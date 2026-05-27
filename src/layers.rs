@@ -6,12 +6,12 @@
 //! This module implements the core neural network layers used by the
 //! TTS model, including attention, MLP, normalization, and vocoder layers.
 
-use std::collections::HashMap;
-use crate::tensor::{Tensor, Device, DType};
-#[cfg(feature = "tch-backend")]
-use tch::nn;
 #[cfg(feature = "mlx")]
 use crate::backend::mlx;
+use crate::tensor::{DType, Device, Tensor};
+use std::collections::HashMap;
+#[cfg(feature = "tch-backend")]
+use tch::nn;
 
 /// RMS Normalization layer.
 pub struct RMSNorm {
@@ -96,9 +96,8 @@ impl Linear {
 
     /// Load Linear from pre-loaded weight tensor (no bias).
     pub fn from_weights(weight: Tensor) -> Self {
-        // Convert to float32 for stable computation
         Self {
-            weight: weight.to_dtype(DType::Float32),
+            weight: linear_weight(weight),
             bias: None,
         }
     }
@@ -106,8 +105,8 @@ impl Linear {
     /// Load Linear from pre-loaded weight and bias tensors.
     pub fn from_weights_with_bias(weight: Tensor, bias: Tensor) -> Self {
         Self {
-            weight: weight.to_dtype(DType::Float32),
-            bias: Some(bias.to_dtype(DType::Float32)),
+            weight: linear_weight(weight),
+            bias: Some(linear_weight(bias)),
         }
     }
 
@@ -119,6 +118,146 @@ impl Linear {
         } else {
             out
         }
+    }
+}
+
+#[cfg(feature = "mlx")]
+fn linear_weight(weight: Tensor) -> Tensor {
+    weight
+}
+
+#[cfg(not(feature = "mlx"))]
+fn linear_weight(weight: Tensor) -> Tensor {
+    weight.to_dtype(DType::Float32)
+}
+
+/// Transformer key/value cache for autoregressive decoding.
+#[derive(Debug, Clone, Default)]
+pub struct KVCache {
+    key: Option<Tensor>,
+    value: Option<Tensor>,
+    offset: i64,
+    capacity: i64,
+}
+
+impl KVCache {
+    /// Number of sequence positions to allocate when growing the cache.
+    pub const STEP: i64 = 256;
+
+    /// Create an empty key/value cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the number of cached sequence positions.
+    pub fn len(&self) -> i64 {
+        self.offset
+    }
+
+    /// Remove all cached key/value tensors.
+    pub fn clear(&mut self) {
+        self.key = None;
+        self.value = None;
+        self.offset = 0;
+        self.capacity = 0;
+    }
+
+    /// Reset logical cache length while keeping allocated storage for reuse.
+    pub fn reset(&mut self) {
+        self.offset = 0;
+    }
+
+    /// Append new key/value tensors and return populated cache slices.
+    #[cfg(feature = "mlx")]
+    pub fn update_and_fetch(&mut self, key: Tensor, value: Tensor) -> (Tensor, Tensor) {
+        let key_shape = key.size();
+        let value_shape = value.size();
+        let prev = self.offset;
+        let added = key_shape[2];
+        let needed = prev + added;
+
+        if self.key.is_none() || needed > self.capacity {
+            let blocks = (added + Self::STEP - 1) / Self::STEP;
+            let grow_by = blocks * Self::STEP;
+            let new_key = Tensor::zeros(
+                &[key_shape[0], key_shape[1], grow_by, key_shape[3]],
+                key.kind(),
+                key.device(),
+            );
+            let new_value = Tensor::zeros(
+                &[value_shape[0], value_shape[1], grow_by, value_shape[3]],
+                value.kind(),
+                value.device(),
+            );
+            self.key = Some(if let Some(cache_key) = &self.key {
+                Tensor::cat(&[cache_key.shallow_clone(), new_key], 2)
+            } else {
+                new_key
+            });
+            self.value = Some(if let Some(cache_value) = &self.value {
+                Tensor::cat(&[cache_value.shallow_clone(), new_value], 2)
+            } else {
+                new_value
+            });
+            self.capacity += grow_by;
+        }
+
+        self.offset = needed;
+        let full_key = self.update_slice(self.key.as_ref().unwrap(), &key, prev, needed);
+        let full_value = self.update_slice(self.value.as_ref().unwrap(), &value, prev, needed);
+        self.key = Some(full_key);
+        self.value = Some(full_value);
+
+        (
+            self.key.as_ref().unwrap().narrow(2, 0, self.offset),
+            self.value.as_ref().unwrap().narrow(2, 0, self.offset),
+        )
+    }
+
+    /// Append new key/value tensors and return populated cache slices.
+    #[cfg(not(feature = "mlx"))]
+    pub fn update_and_fetch(&mut self, key: Tensor, value: Tensor) -> (Tensor, Tensor) {
+        let key = if let Some(previous_key) = &self.key {
+            Tensor::cat(&[previous_key.shallow_clone(), key], 2)
+        } else {
+            key
+        };
+        let value = if let Some(previous_value) = &self.value {
+            Tensor::cat(&[previous_value.shallow_clone(), value], 2)
+        } else {
+            value
+        };
+        self.offset = key.size()[2];
+        self.capacity = self.offset;
+        self.key = Some(key.shallow_clone());
+        self.value = Some(value.shallow_clone());
+        (key, value)
+    }
+
+    #[cfg(feature = "mlx")]
+    fn update_slice(
+        &self,
+        cache: &Tensor,
+        update: &Tensor,
+        start_index: i64,
+        stop_index: i64,
+    ) -> Tensor {
+        let shape = cache.size();
+        let start = [0, 0, start_index as i32, 0];
+        let stop = [
+            shape[0] as i32,
+            shape[1] as i32,
+            stop_index as i32,
+            shape[3] as i32,
+        ];
+        let strides = [1, 1, 1, 1];
+        Tensor::from_mlx(mlx::ops::slice_update(
+            cache.as_mlx(),
+            update.as_mlx(),
+            &start,
+            &stop,
+            &strides,
+        ))
     }
 }
 
@@ -164,8 +303,19 @@ impl RotaryEmbedding {
     }
 
     /// Apply rotary embedding to query and key tensors.
-    #[allow(unused_variables)]
     pub fn forward(&self, q: &Tensor, k: &Tensor, seq_len: i64) -> (Tensor, Tensor) {
+        self.forward_with_offset(q, k, seq_len, 0)
+    }
+
+    /// Apply rotary embedding with a cache offset for incremental decoding.
+    #[allow(unused_variables)]
+    pub fn forward_with_offset(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        seq_len: i64,
+        offset: i64,
+    ) -> (Tensor, Tensor) {
         // Use MLX fused RoPE kernel for better performance on Apple Silicon
         #[cfg(feature = "mlx")]
         {
@@ -180,7 +330,7 @@ impl RotaryEmbedding {
                 false, // GPT-NeoX style (not traditional)
                 Some(&base),
                 1.0, // scale
-                0,   // offset
+                offset as i32,
             ));
             let k_rope = Tensor::from_mlx(mlx::ops::fast_rope(
                 k.as_mlx(),
@@ -188,15 +338,15 @@ impl RotaryEmbedding {
                 false,
                 Some(&base),
                 1.0,
-                0,
+                offset as i32,
             ));
 
             return (q_rope, k_rope);
         }
         #[cfg(not(feature = "mlx"))]
         {
-            let cos = self.cos_cache.narrow(0, 0, seq_len);
-            let sin = self.sin_cache.narrow(0, 0, seq_len);
+            let cos = self.cos_cache.narrow(0, offset, seq_len);
+            let sin = self.sin_cache.narrow(0, offset, seq_len);
 
             let q_embed = self.apply_rope(q, &cos, &sin);
             let k_embed = self.apply_rope(k, &cos, &sin);
@@ -298,10 +448,10 @@ impl Attention {
         // Load Q/K norm if present
         let q_norm = weights
             .get(&format!("{}.q_norm.weight", prefix))
-            .map(|t| t.to_device(device).to_dtype(DType::Float32));
+            .map(|t| t.to_device(device));
         let k_norm = weights
             .get(&format!("{}.k_norm.weight", prefix))
-            .map(|t| t.to_device(device).to_dtype(DType::Float32));
+            .map(|t| t.to_device(device));
 
         Some(Self {
             q_proj: Linear::from_weights(q_proj),
@@ -322,6 +472,17 @@ impl Attention {
         hidden_states: &Tensor,
         rotary_emb: &RotaryEmbedding,
         attention_mask: Option<&Tensor>,
+    ) -> Tensor {
+        self.forward_with_cache(hidden_states, rotary_emb, attention_mask, None)
+    }
+
+    /// Apply multi-head attention and update KV cache when provided.
+    pub fn forward_with_cache(
+        &self,
+        hidden_states: &Tensor,
+        rotary_emb: &RotaryEmbedding,
+        attention_mask: Option<&Tensor>,
+        cache: Option<&mut KVCache>,
     ) -> Tensor {
         let size = hidden_states.size();
         let batch_size = size[0];
@@ -390,10 +551,14 @@ impl Attention {
             key
         };
 
-        // Apply rotary embeddings
-        let (query, key) = rotary_emb.forward(&query, &key, seq_len);
+        // Apply rotary embeddings at the correct cache offset.
+        let cache_offset = cache.as_ref().map(|cache| cache.len()).unwrap_or(0);
+        let (query, key) = rotary_emb.forward_with_offset(&query, &key, seq_len, cache_offset);
 
-        // Expand KV heads for GQA if needed
+        // Tch attention below does not support grouped-query attention directly,
+        // so expand KV heads there. MLX SDPA supports GQA and is faster without
+        // materializing repeated KV heads.
+        #[cfg(not(feature = "mlx"))]
         let (key, value) = if self.num_kv_heads != self.num_heads {
             let repeat_factor = self.num_heads / self.num_kv_heads;
             let key = key
@@ -423,6 +588,14 @@ impl Attention {
                 )
                 .reshape(&[batch_size, self.num_heads, seq_len, self.head_dim]);
             (key, value)
+        } else {
+            (key, value)
+        };
+        #[cfg(feature = "mlx")]
+        let (key, value) = (key, value);
+
+        let (key, value) = if let Some(cache) = cache {
+            cache.update_and_fetch(key, value)
         } else {
             (key, value)
         };
@@ -768,10 +941,23 @@ impl TransformerLayer {
         rotary_emb: &RotaryEmbedding,
         attention_mask: Option<&Tensor>,
     ) -> Tensor {
+        self.forward_with_cache(hidden_states, rotary_emb, attention_mask, None)
+    }
+
+    /// Apply the transformer layer and update KV cache when provided.
+    pub fn forward_with_cache(
+        &self,
+        hidden_states: &Tensor,
+        rotary_emb: &RotaryEmbedding,
+        attention_mask: Option<&Tensor>,
+        cache: Option<&mut KVCache>,
+    ) -> Tensor {
         // Self-attention with residual
         let residual = hidden_states;
         let hidden = self.input_layernorm.forward(hidden_states);
-        let hidden = self.self_attn.forward(&hidden, rotary_emb, attention_mask);
+        let hidden = self
+            .self_attn
+            .forward_with_cache(&hidden, rotary_emb, attention_mask, cache);
         let hidden = residual + hidden;
 
         // MLP with residual

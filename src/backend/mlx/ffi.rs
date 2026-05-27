@@ -224,12 +224,7 @@ extern "C" {
         s: mlx_stream,
     ) -> c_int;
 
-    pub fn mlx_expand_dims(
-        res: *mut mlx_array,
-        a: mlx_array,
-        axis: c_int,
-        s: mlx_stream,
-    ) -> c_int;
+    pub fn mlx_expand_dims(res: *mut mlx_array, a: mlx_array, axis: c_int, s: mlx_stream) -> c_int;
 
     pub fn mlx_squeeze_axes(
         res: *mut mlx_array,
@@ -250,6 +245,19 @@ extern "C" {
     pub fn mlx_slice(
         res: *mut mlx_array,
         a: mlx_array,
+        start: *const c_int,
+        start_num: usize,
+        stop: *const c_int,
+        stop_num: usize,
+        strides: *const c_int,
+        strides_num: usize,
+        s: mlx_stream,
+    ) -> c_int;
+
+    pub fn mlx_slice_update(
+        res: *mut mlx_array,
+        src: mlx_array,
+        update: mlx_array,
         start: *const c_int,
         start_num: usize,
         stop: *const c_int,
@@ -393,19 +401,9 @@ extern "C" {
     ) -> c_int;
 
     // Reduction (all axes)
-    pub fn mlx_sum(
-        res: *mut mlx_array,
-        a: mlx_array,
-        keepdims: bool,
-        s: mlx_stream,
-    ) -> c_int;
+    pub fn mlx_sum(res: *mut mlx_array, a: mlx_array, keepdims: bool, s: mlx_stream) -> c_int;
 
-    pub fn mlx_mean(
-        res: *mut mlx_array,
-        a: mlx_array,
-        keepdims: bool,
-        s: mlx_stream,
-    ) -> c_int;
+    pub fn mlx_mean(res: *mut mlx_array, a: mlx_array, keepdims: bool, s: mlx_stream) -> c_int;
 
     pub fn mlx_argmax_axis(
         res: *mut mlx_array,
@@ -455,12 +453,7 @@ extern "C" {
     pub fn mlx_less(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) -> c_int;
     pub fn mlx_greater(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) -> c_int;
     pub fn mlx_equal(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) -> c_int;
-    pub fn mlx_logical_or(
-        res: *mut mlx_array,
-        a: mlx_array,
-        b: mlx_array,
-        s: mlx_stream,
-    ) -> c_int;
+    pub fn mlx_logical_or(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) -> c_int;
     pub fn mlx_logical_not(res: *mut mlx_array, a: mlx_array, s: mlx_stream) -> c_int;
 
     // Triangular
@@ -477,26 +470,12 @@ extern "C" {
     ) -> c_int;
 
     // Sort / argsort
-    pub fn mlx_sort(
-        res: *mut mlx_array,
-        a: mlx_array,
-        axis: c_int,
-        s: mlx_stream,
-    ) -> c_int;
-    pub fn mlx_argsort_axis(
-        res: *mut mlx_array,
-        a: mlx_array,
-        axis: c_int,
-        s: mlx_stream,
-    ) -> c_int;
+    pub fn mlx_sort(res: *mut mlx_array, a: mlx_array, axis: c_int, s: mlx_stream) -> c_int;
+    pub fn mlx_argsort_axis(res: *mut mlx_array, a: mlx_array, axis: c_int, s: mlx_stream)
+        -> c_int;
 
     // Type conversion
-    pub fn mlx_astype(
-        res: *mut mlx_array,
-        a: mlx_array,
-        dtype: mlx_dtype,
-        s: mlx_stream,
-    ) -> c_int;
+    pub fn mlx_astype(res: *mut mlx_array, a: mlx_array, dtype: mlx_dtype, s: mlx_stream) -> c_int;
 
     // Convolution
     pub fn mlx_conv1d(
@@ -658,9 +637,7 @@ extern "C" {
         value: *mut mlx_array,
         it: mlx_map_string_to_array_iterator,
     ) -> c_int;
-    pub fn mlx_map_string_to_array_iterator_free(
-        it: mlx_map_string_to_array_iterator,
-    ) -> c_int;
+    pub fn mlx_map_string_to_array_iterator_free(it: mlx_map_string_to_array_iterator) -> c_int;
 
     pub fn mlx_map_string_to_string_new() -> mlx_map_string_to_string;
     pub fn mlx_map_string_to_string_free(map: mlx_map_string_to_string) -> c_int;

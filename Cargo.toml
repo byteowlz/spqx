@@ -74,5 +74,9 @@ path = "src/bin/voice_clone.rs"
 name = "api_server"
 path = "src/bin/api_server.rs"
 
+[[bin]]
+name = "worker"
+path = "src/bin/worker.rs"
+
 [dev-dependencies]
 tempfile = "3.14"

@@ -82,8 +82,8 @@ impl From<crate::backend::mlx::ffi::mlx_dtype> for DType {
             MLX_FLOAT32 | MLX_FLOAT64 => DType::Float32,
             MLX_FLOAT16 => DType::Float16,
             MLX_BFLOAT16 => DType::BFloat16,
-            MLX_INT64 => DType::Int64,
-            MLX_INT32 | MLX_INT8 | MLX_INT16 => DType::Int32,
+            MLX_INT64 | MLX_UINT64 => DType::Int64,
+            MLX_INT32 | MLX_INT8 | MLX_INT16 | MLX_UINT8 | MLX_UINT16 | MLX_UINT32 => DType::Int32,
             MLX_BOOL => DType::Bool,
             _ => DType::Float32,
         }
@@ -222,8 +222,8 @@ impl Tensor {
     }
 
     pub fn arange(start: i64, end: i64, device: Device) -> Self {
-        let t = tch::Tensor::arange(end - start, (tch::Kind::Int64, tch::Device::from(device)))
-            + start;
+        let t =
+            tch::Tensor::arange(end - start, (tch::Kind::Int64, tch::Device::from(device))) + start;
         Tensor::from_tch(t)
     }
 
@@ -459,6 +459,11 @@ impl Tensor {
         (Tensor::from_tch(values), Tensor::from_tch(indices))
     }
 
+    pub fn topk_values(&self, k: i64, dim: i64, largest: bool, sorted: bool) -> Self {
+        let (values, _) = self.inner.topk(k, dim, largest, sorted);
+        Tensor::from_tch(values)
+    }
+
     pub fn multinomial(&self, num_samples: i64, replacement: bool) -> Self {
         Tensor::from_tch(self.inner.multinomial(num_samples, replacement))
     }
@@ -619,8 +624,7 @@ impl Tensor {
         let flat = self.inner.view(-1);
         let numel = flat.numel();
         let mut result = vec![0.0f32; numel];
-        flat.to_kind(tch::Kind::Float)
-            .copy_data(&mut result, numel);
+        flat.to_kind(tch::Kind::Float).copy_data(&mut result, numel);
         result
     }
 
@@ -786,10 +790,7 @@ impl Tensor {
         } else {
             dim
         } as i32;
-        Tensor::from_mlx(crate::backend::mlx::ops::expand_dims(
-            &self.inner,
-            &[dim],
-        ))
+        Tensor::from_mlx(crate::backend::mlx::ops::expand_dims(&self.inner, &[dim]))
     }
 
     pub fn squeeze_dim(&self, dim: i64) -> Self {
@@ -803,29 +804,14 @@ impl Tensor {
 
     pub fn transpose(&self, dim0: i64, dim1: i64) -> Self {
         let ndim = self.inner.ndim();
-        let dim0 = if dim0 < 0 {
-            ndim as i64 + dim0
-        } else {
-            dim0
-        } as i32;
-        let dim1 = if dim1 < 0 {
-            ndim as i64 + dim1
-        } else {
-            dim1
-        } as i32;
-        Tensor::from_mlx(crate::backend::mlx::ops::swapaxes(
-            &self.inner,
-            dim0,
-            dim1,
-        ))
+        let dim0 = if dim0 < 0 { ndim as i64 + dim0 } else { dim0 } as i32;
+        let dim1 = if dim1 < 0 { ndim as i64 + dim1 } else { dim1 } as i32;
+        Tensor::from_mlx(crate::backend::mlx::ops::swapaxes(&self.inner, dim0, dim1))
     }
 
     pub fn permute(&self, dims: &[i64]) -> Self {
         let dims_i32: Vec<i32> = dims.iter().map(|&d| d as i32).collect();
-        Tensor::from_mlx(crate::backend::mlx::ops::transpose(
-            &self.inner,
-            &dims_i32,
-        ))
+        Tensor::from_mlx(crate::backend::mlx::ops::transpose(&self.inner, &dims_i32))
     }
 
     pub fn expand(&self, size: &[i64], _implicit: bool) -> Self {
@@ -834,13 +820,7 @@ impl Tensor {
         let shape_i32: Vec<i32> = size
             .iter()
             .enumerate()
-            .map(|(i, &s)| {
-                if s == -1 {
-                    current[i]
-                } else {
-                    s as i32
-                }
-            })
+            .map(|(i, &s)| if s == -1 { current[i] } else { s as i32 })
             .collect();
         Tensor::from_mlx(crate::backend::mlx::ops::broadcast_to(
             &self.inner,
@@ -973,9 +953,16 @@ impl Tensor {
     // -- Reduction --
 
     pub fn mean_dim(&self, dims: &[i64], keepdim: bool) -> Self {
-        let dims_i32: Vec<i32> = dims.iter().map(|&d| {
-            if d < 0 { self.inner.ndim() as i32 + d as i32 } else { d as i32 }
-        }).collect();
+        let dims_i32: Vec<i32> = dims
+            .iter()
+            .map(|&d| {
+                if d < 0 {
+                    self.inner.ndim() as i32 + d as i32
+                } else {
+                    d as i32
+                }
+            })
+            .collect();
         Tensor::from_mlx(crate::backend::mlx::ops::mean(
             &self.inner,
             &dims_i32,
@@ -984,9 +971,16 @@ impl Tensor {
     }
 
     pub fn sum_dim(&self, dims: &[i64], keepdim: bool) -> Self {
-        let dims_i32: Vec<i32> = dims.iter().map(|&d| {
-            if d < 0 { self.inner.ndim() as i32 + d as i32 } else { d as i32 }
-        }).collect();
+        let dims_i32: Vec<i32> = dims
+            .iter()
+            .map(|&d| {
+                if d < 0 {
+                    self.inner.ndim() as i32 + d as i32
+                } else {
+                    d as i32
+                }
+            })
+            .collect();
         Tensor::from_mlx(crate::backend::mlx::ops::sum(
             &self.inner,
             &dims_i32,
@@ -996,9 +990,16 @@ impl Tensor {
 
     pub fn var_dim(&self, dims: &[i64], unbiased: bool, keepdim: bool) -> Self {
         let ddof = if unbiased { 1 } else { 0 };
-        let dims_i32: Vec<i32> = dims.iter().map(|&d| {
-            if d < 0 { self.inner.ndim() as i32 + d as i32 } else { d as i32 }
-        }).collect();
+        let dims_i32: Vec<i32> = dims
+            .iter()
+            .map(|&d| {
+                if d < 0 {
+                    self.inner.ndim() as i32 + d as i32
+                } else {
+                    d as i32
+                }
+            })
+            .collect();
         Tensor::from_mlx(crate::backend::mlx::ops::var(
             &self.inner,
             &dims_i32,
@@ -1067,8 +1068,18 @@ impl Tensor {
         let top_stops = self.inner.shape();
         let top_strides = vec![1i32; ndim];
         top_starts[dim as usize] = n - k as i32;
-        let top_indices = crate::backend::mlx::ops::slice(&sorted_idx, &top_starts, &top_stops, &top_strides);
+        let top_indices =
+            crate::backend::mlx::ops::slice(&sorted_idx, &top_starts, &top_stops, &top_strides);
         (Tensor::from_mlx(values), Tensor::from_mlx(top_indices))
+    }
+
+    pub fn topk_values(&self, k: i64, dim: i64, _largest: bool, _sorted: bool) -> Self {
+        let dim = if dim < 0 {
+            self.inner.ndim() as i64 + dim
+        } else {
+            dim
+        } as i32;
+        Tensor::from_mlx(crate::backend::mlx::ops::topk(&self.inner, k as i32, dim))
     }
 
     pub fn multinomial(&self, num_samples: i64, _replacement: bool) -> Self {
@@ -1097,17 +1108,11 @@ impl Tensor {
     }
 
     pub fn triu(&self, diagonal: i64) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::triu(
-            &self.inner,
-            diagonal as i32,
-        ))
+        Tensor::from_mlx(crate::backend::mlx::ops::triu(&self.inner, diagonal as i32))
     }
 
     pub fn tril(&self, diagonal: i64) -> Self {
-        Tensor::from_mlx(crate::backend::mlx::ops::tril(
-            &self.inner,
-            diagonal as i32,
-        ))
+        Tensor::from_mlx(crate::backend::mlx::ops::tril(&self.inner, diagonal as i32))
     }
 
     // -- Comparison --
@@ -1138,7 +1143,7 @@ impl Tensor {
         // PyTorch expects input [N, C_in, L], weight [C_out, C_in, K]
         // We need to transpose input and weight, then transpose output back.
         let input_t = self.transpose(1, 2); // [N, C_in, L] -> [N, L, C_in]
-        // Weight transpose: [C_out, C_in, K] -> [C_out, K, C_in]
+                                            // Weight transpose: [C_out, C_in, K] -> [C_out, K, C_in]
         let weight_t = weight.transpose(1, 2);
         let result = crate::backend::mlx::ops::conv1d(
             &input_t.inner,
@@ -1295,14 +1300,24 @@ impl Tensor {
 
     pub fn int64_value(&self, indices: &[i64]) -> i64 {
         // Index into the array at the given coordinates, then extract scalar.
-        if indices.is_empty() {
-            return self.inner.item_i64();
+        let value = if indices.is_empty() {
+            self.inner.clone()
+        } else {
+            let starts: Vec<i32> = indices.iter().map(|&i| i as i32).collect();
+            let stops: Vec<i32> = indices.iter().map(|&i| i as i32 + 1).collect();
+            let strides: Vec<i32> = vec![1; indices.len()];
+            crate::backend::mlx::ops::slice(&self.inner, &starts, &stops, &strides)
+        };
+        use crate::backend::mlx::ffi::mlx_dtype;
+        match value.dtype() {
+            mlx_dtype::MLX_INT32
+            | mlx_dtype::MLX_INT16
+            | mlx_dtype::MLX_INT8
+            | mlx_dtype::MLX_UINT32
+            | mlx_dtype::MLX_UINT16
+            | mlx_dtype::MLX_UINT8 => value.item_i32() as i64,
+            _ => value.item_i64(),
         }
-        let starts: Vec<i32> = indices.iter().map(|&i| i as i32).collect();
-        let stops: Vec<i32> = indices.iter().map(|&i| i as i32 + 1).collect();
-        let strides: Vec<i32> = vec![1; indices.len()];
-        let sliced = crate::backend::mlx::ops::slice(&self.inner, &starts, &stops, &strides);
-        sliced.item_i64()
     }
 
     pub fn f64_value(&self, indices: &[i64]) -> f64 {
@@ -1317,7 +1332,9 @@ impl Tensor {
     }
 
     pub fn to_vec_f32(&self) -> Vec<f32> {
-        let f32_arr = self.inner.astype(crate::backend::mlx::ffi::mlx_dtype::MLX_FLOAT32);
+        let f32_arr = self
+            .inner
+            .astype(crate::backend::mlx::ffi::mlx_dtype::MLX_FLOAT32);
         f32_arr.to_vec_f32()
     }
 
@@ -1335,9 +1352,13 @@ impl std::ops::Add<&Tensor> for &Tensor {
     type Output = Tensor;
     fn add(self, rhs: &Tensor) -> Tensor {
         #[cfg(feature = "tch-backend")]
-        { Tensor::from_tch(&self.inner + &rhs.inner) }
+        {
+            Tensor::from_tch(&self.inner + &rhs.inner)
+        }
         #[cfg(feature = "mlx")]
-        { Tensor::from_mlx(crate::backend::mlx::ops::add(&self.inner, &rhs.inner)) }
+        {
+            Tensor::from_mlx(crate::backend::mlx::ops::add(&self.inner, &rhs.inner))
+        }
     }
 }
 
@@ -1367,7 +1388,9 @@ impl std::ops::Add<f64> for &Tensor {
     type Output = Tensor;
     fn add(self, rhs: f64) -> Tensor {
         #[cfg(feature = "tch-backend")]
-        { Tensor::from_tch(&self.inner + rhs) }
+        {
+            Tensor::from_tch(&self.inner + rhs)
+        }
         #[cfg(feature = "mlx")]
         {
             let scalar = crate::backend::mlx::array::MlxArray::scalar_f32(rhs as f32);
@@ -1388,9 +1411,13 @@ impl std::ops::Sub<&Tensor> for &Tensor {
     type Output = Tensor;
     fn sub(self, rhs: &Tensor) -> Tensor {
         #[cfg(feature = "tch-backend")]
-        { Tensor::from_tch(&self.inner - &rhs.inner) }
+        {
+            Tensor::from_tch(&self.inner - &rhs.inner)
+        }
         #[cfg(feature = "mlx")]
-        { Tensor::from_mlx(crate::backend::mlx::ops::subtract(&self.inner, &rhs.inner)) }
+        {
+            Tensor::from_mlx(crate::backend::mlx::ops::subtract(&self.inner, &rhs.inner))
+        }
     }
 }
 
@@ -1420,9 +1447,13 @@ impl std::ops::Mul<&Tensor> for &Tensor {
     type Output = Tensor;
     fn mul(self, rhs: &Tensor) -> Tensor {
         #[cfg(feature = "tch-backend")]
-        { Tensor::from_tch(&self.inner * &rhs.inner) }
+        {
+            Tensor::from_tch(&self.inner * &rhs.inner)
+        }
         #[cfg(feature = "mlx")]
-        { Tensor::from_mlx(crate::backend::mlx::ops::multiply(&self.inner, &rhs.inner)) }
+        {
+            Tensor::from_mlx(crate::backend::mlx::ops::multiply(&self.inner, &rhs.inner))
+        }
     }
 }
 
@@ -1452,7 +1483,9 @@ impl std::ops::Mul<f64> for &Tensor {
     type Output = Tensor;
     fn mul(self, rhs: f64) -> Tensor {
         #[cfg(feature = "tch-backend")]
-        { Tensor::from_tch(&self.inner * rhs) }
+        {
+            Tensor::from_tch(&self.inner * rhs)
+        }
         #[cfg(feature = "mlx")]
         {
             let scalar = crate::backend::mlx::array::MlxArray::scalar_f32(rhs as f32);
@@ -1488,9 +1521,13 @@ impl std::ops::Div<&Tensor> for &Tensor {
     type Output = Tensor;
     fn div(self, rhs: &Tensor) -> Tensor {
         #[cfg(feature = "tch-backend")]
-        { Tensor::from_tch(&self.inner / &rhs.inner) }
+        {
+            Tensor::from_tch(&self.inner / &rhs.inner)
+        }
         #[cfg(feature = "mlx")]
-        { Tensor::from_mlx(crate::backend::mlx::ops::divide(&self.inner, &rhs.inner)) }
+        {
+            Tensor::from_mlx(crate::backend::mlx::ops::divide(&self.inner, &rhs.inner))
+        }
     }
 }
 
@@ -1520,7 +1557,9 @@ impl std::ops::Div<f64> for &Tensor {
     type Output = Tensor;
     fn div(self, rhs: f64) -> Tensor {
         #[cfg(feature = "tch-backend")]
-        { Tensor::from_tch(&self.inner / rhs) }
+        {
+            Tensor::from_tch(&self.inner / rhs)
+        }
         #[cfg(feature = "mlx")]
         {
             let scalar = crate::backend::mlx::array::MlxArray::scalar_f32(rhs as f32);

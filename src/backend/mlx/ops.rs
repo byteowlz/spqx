@@ -127,12 +127,7 @@ pub fn expand_dims(a: &MlxArray, axes: &[i32]) -> MlxArray {
     for &axis in axes {
         let mut res = MlxArray::empty();
         unsafe {
-            ffi::mlx_expand_dims(
-                &mut res.ptr,
-                result.ptr,
-                axis,
-                default_stream(),
-            );
+            ffi::mlx_expand_dims(&mut res.ptr, result.ptr, axis, default_stream());
         }
         result = res;
     }
@@ -153,17 +148,37 @@ pub fn squeeze(a: &MlxArray, axes: &[i32]) -> MlxArray {
     res
 }
 
-pub fn slice(
-    a: &MlxArray,
+pub fn slice(a: &MlxArray, start: &[i32], stop: &[i32], strides: &[i32]) -> MlxArray {
+    let mut res = MlxArray::empty();
+    unsafe {
+        ffi::mlx_slice(
+            &mut res.ptr,
+            a.ptr,
+            start.as_ptr(),
+            start.len(),
+            stop.as_ptr(),
+            stop.len(),
+            strides.as_ptr(),
+            strides.len(),
+            default_stream(),
+        );
+    }
+    res
+}
+
+pub fn slice_update(
+    src: &MlxArray,
+    update: &MlxArray,
     start: &[i32],
     stop: &[i32],
     strides: &[i32],
 ) -> MlxArray {
     let mut res = MlxArray::empty();
     unsafe {
-        ffi::mlx_slice(
+        ffi::mlx_slice_update(
             &mut res.ptr,
-            a.ptr,
+            src.ptr,
+            update.ptr,
             start.as_ptr(),
             start.len(),
             stop.as_ptr(),
@@ -586,7 +601,14 @@ pub fn fast_layer_norm(
     let mut res = MlxArray::empty();
     let bias_ptr = bias.map_or(std::ptr::null_mut(), |b| b.ptr);
     unsafe {
-        ffi::mlx_fast_layer_norm(&mut res.ptr, x.ptr, weight.ptr, bias_ptr, eps, default_stream());
+        ffi::mlx_fast_layer_norm(
+            &mut res.ptr,
+            x.ptr,
+            weight.ptr,
+            bias_ptr,
+            eps,
+            default_stream(),
+        );
     }
     res
 }
@@ -604,9 +626,15 @@ pub fn fast_rope(
         Some(_b) => {
             // Extract scalar float from the base array
             let val = _b.item_f32();
-            ffi::mlx_optional_float { value: val, has_value: true }
+            ffi::mlx_optional_float {
+                value: val,
+                has_value: true,
+            }
         }
-        None => ffi::mlx_optional_float { value: 0.0, has_value: false },
+        None => ffi::mlx_optional_float {
+            value: 0.0,
+            has_value: false,
+        },
     };
     let freqs_ptr: ffi::mlx_array = std::ptr::null_mut(); // no custom freqs
     unsafe {
@@ -674,13 +702,7 @@ pub fn random_categorical(logits: &MlxArray, axis: i32, _num_samples: i32) -> Ml
     unsafe { ffi::mlx_random_key(&mut key.ptr, rand_seed()) };
     let mut res = MlxArray::empty();
     unsafe {
-        ffi::mlx_random_categorical(
-            &mut res.ptr,
-            logits.ptr,
-            axis,
-            key.ptr,
-            default_stream(),
-        );
+        ffi::mlx_random_categorical(&mut res.ptr, logits.ptr, axis, key.ptr, default_stream());
     }
     res
 }

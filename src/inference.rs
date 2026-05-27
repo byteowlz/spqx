@@ -11,11 +11,11 @@
 
 use crate::config::{Qwen3TTSConfig, TalkerCodePredictorConfig, TalkerConfig};
 use crate::error::{Qwen3TTSError, Result};
-use crate::layers::{Linear, RMSNorm, RotaryEmbedding, TransformerLayer};
+use crate::layers::{KVCache, Linear, RMSNorm, RotaryEmbedding, TransformerLayer};
+use crate::tensor::{DType, Device, Tensor};
 use crate::vocoder::{load_vocoder_weights, Vocoder, VocoderConfig};
 use std::collections::HashMap;
 use std::path::Path;
-use crate::tensor::{Tensor, Device, DType};
 use tokenizers::Tokenizer;
 
 /// Code predictor sub-transformer for generating codes 1-15 autoregressively.
@@ -171,12 +171,13 @@ impl CodePredictor {
         code_0_embedding: &Tensor,
         temperature: f64,
         top_k: i64,
+        caches: &mut [KVCache],
     ) -> Vec<i64> {
         let mut codes = Vec::new();
-
-        // Start with [main_hidden, code_0_embedding] as input
-        // Note: For 1.7B+ models, these are at main_hidden_size (2048), not code_predictor hidden_size (1024)
-        let mut sequence = Tensor::cat(
+        for cache in caches.iter_mut() {
+            cache.clear();
+        }
+        let mut input = Tensor::cat(
             &[
                 main_hidden.shallow_clone(),
                 code_0_embedding.shallow_clone(),
@@ -185,63 +186,59 @@ impl CodePredictor {
         );
 
         for step in 0..self.lm_heads.len() {
-            let seq_len = sequence.size()[1];
-
-            // Create causal mask
-            let mask = Tensor::zeros(&[seq_len, seq_len], DType::Float32, self.device);
-            let upper = Tensor::ones(&[seq_len, seq_len], DType::Bool, self.device).triu(1);
-            let causal_mask = mask.masked_fill(&upper, f64::NEG_INFINITY);
-            let causal_mask = causal_mask.view(&[1, 1, seq_len, seq_len]);
-
-            // Apply projection if present (1.7B+ models: project from 2048 to 1024)
-            let projected_sequence = if let Some(ref proj) = self.small_to_mtp_projection {
-                proj.forward(&sequence)
+            let seq_len = input.size()[1];
+            let causal_mask = if step == 0 && seq_len > 1 {
+                let mask = Tensor::zeros(&[seq_len, seq_len], DType::Float32, self.device);
+                let upper = Tensor::ones(&[seq_len, seq_len], DType::Bool, self.device).triu(1);
+                Some(
+                    mask.masked_fill(&upper, f64::NEG_INFINITY)
+                        .view(&[1, 1, seq_len, seq_len]),
+                )
             } else {
-                sequence.shallow_clone()
+                None
             };
 
-            // Run through transformer layers
-            let mut hidden = projected_sequence;
-            for layer in &self.layers {
-                hidden = layer.forward(&hidden, &self.rotary_emb, Some(&causal_mask));
+            let mut hidden = if let Some(ref proj) = self.small_to_mtp_projection {
+                proj.forward(&input)
+            } else {
+                input.shallow_clone()
+            };
+            for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+                hidden = layer.forward_with_cache(
+                    &hidden,
+                    &self.rotary_emb,
+                    causal_mask.as_ref(),
+                    Some(cache),
+                );
             }
 
-            // Apply final norm and get logits at last position
             let normed = self.norm.forward(&hidden);
-            let last_hidden = normed.select(1, seq_len - 1).unsqueeze(0);
-            let logits = self.lm_heads[step].forward(&last_hidden).squeeze_dim(0);
-
-            // Sample or argmax
+            let logits = self.lm_heads[step]
+                .forward(&normed.select(1, seq_len - 1).unsqueeze(0))
+                .squeeze_dim(0);
             let code = if temperature <= 0.0 {
                 logits.argmax(-1, false).int64_value(&[0])
             } else {
                 let logits = &logits / temperature;
-
-                // Apply top-k filtering
                 let logits = if top_k > 0 {
                     let vocab_size = logits.size()[logits.dim() - 1];
                     let k = top_k.min(vocab_size);
-                    let (top_values, _) = logits.topk(k, -1, true, true);
+                    let top_values = logits.topk_values(k, -1, true, true);
                     let threshold = top_values.select(-1, k - 1);
                     let mask = logits.lt_tensor(&threshold.unsqueeze(-1));
                     logits.masked_fill(&mask, f64::NEG_INFINITY)
                 } else {
                     logits
                 };
-
-                let probs = logits.softmax(-1);
-                probs.multinomial(1, true).int64_value(&[0, 0])
+                logits.softmax(-1).multinomial(1, true).int64_value(&[0, 0])
             };
 
             codes.push(code);
-
-            // Embed the predicted code and append to sequence
             if step < self.code_embeddings.len() {
                 let code_tensor = Tensor::from_slice_i64(&[code]).to_device(self.device);
-                let emb = self.code_embeddings[step]
+                input = self.code_embeddings[step]
                     .index_select(0, &code_tensor)
-                    .unsqueeze(0); // [1, 1, hidden_size]
-                sequence = Tensor::cat(&[sequence, emb], 1);
+                    .unsqueeze(0);
             }
         }
 
@@ -574,9 +571,7 @@ impl TalkerModel {
         ]); // [1, 4, 1024]
 
         // Speaker embedding: use provided x-vector directly (reshape to [1, 1, 1024])
-        let spk_embed = speaker_embedding
-            .to_dtype(DType::Float32)
-            .to_device(self.device);
+        let spk_embed = speaker_embedding.to_device(self.device);
         let spk_embed = if spk_embed.dim() == 1 {
             spk_embed.unsqueeze(0).unsqueeze(0) // [1024] → [1, 1, 1024]
         } else if spk_embed.dim() == 2 {
@@ -689,9 +684,7 @@ impl TalkerModel {
         ]); // [1, 4, 1024]
 
         // Speaker embedding
-        let spk_embed = speaker_embedding
-            .to_dtype(DType::Float32)
-            .to_device(self.device);
+        let spk_embed = speaker_embedding.to_device(self.device);
         let spk_embed = if spk_embed.dim() == 1 {
             spk_embed.unsqueeze(0).unsqueeze(0)
         } else if spk_embed.dim() == 2 {
@@ -804,11 +797,17 @@ impl TalkerModel {
 
     /// Run the transformer forward pass on embeddings.
     /// Returns NORMED hidden states (used for both codec_head and code predictor).
-    fn forward_embeds(&self, embeddings: &Tensor, attention_mask: Option<&Tensor>) -> Tensor {
+    fn forward_embeds_with_cache(
+        &self,
+        embeddings: &Tensor,
+        attention_mask: Option<&Tensor>,
+        caches: &mut [KVCache],
+    ) -> Tensor {
         let mut hidden = embeddings.shallow_clone();
 
-        for layer in &self.layers {
-            hidden = layer.forward(&hidden, &self.rotary_emb, attention_mask);
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            hidden =
+                layer.forward_with_cache(&hidden, &self.rotary_emb, attention_mask, Some(cache));
         }
 
         self.norm.forward(&hidden)
@@ -858,7 +857,7 @@ impl TalkerModel {
             let logits = if top_k > 0 {
                 let vocab_size = logits.size()[logits.dim() - 1];
                 let k = top_k.min(vocab_size);
-                let (top_values, _) = logits.topk(k, -1, true, true);
+                let top_values = logits.topk_values(k, -1, true, true);
                 let threshold = top_values.select(-1, k - 1);
                 let mask = logits.lt_tensor(&threshold.unsqueeze(-1));
                 logits.masked_fill(&mask, f64::NEG_INFINITY)
@@ -884,21 +883,26 @@ impl TalkerModel {
         let repetition_penalty = 1.05; // From generation_config.json
         let mut all_codes = Vec::new();
         let mut past_code_0s: Vec<i64> = Vec::new();
-        let mut full_sequence = input_embeddings.shallow_clone();
+        let mut caches = (0..self.layers.len())
+            .map(|_| KVCache::new())
+            .collect::<Vec<_>>();
+        let mut code_predictor_caches = (0..self.code_predictor.layers.len())
+            .map(|_| KVCache::new())
+            .collect::<Vec<_>>();
+        let prefill_len = input_embeddings.size()[1];
+        let mask_zeros = Tensor::zeros(&[prefill_len, prefill_len], DType::Float32, self.device);
+        let upper = Tensor::ones(&[prefill_len, prefill_len], DType::Bool, self.device).triu(1);
+        let causal_mask = mask_zeros.masked_fill(&upper, f64::NEG_INFINITY).view(&[
+            1,
+            1,
+            prefill_len,
+            prefill_len,
+        ]);
+        let mut normed_hidden =
+            self.forward_embeds_with_cache(input_embeddings, Some(&causal_mask), &mut caches);
 
         for step in 0..max_codes {
-            let seq_len = full_sequence.size()[1];
-
-            // Create causal mask
-            let mask_zeros = Tensor::zeros(&[seq_len, seq_len], DType::Float32, self.device);
-            let upper = Tensor::ones(&[seq_len, seq_len], DType::Bool, self.device).triu(1);
-            let causal_mask = mask_zeros.masked_fill(&upper, f64::NEG_INFINITY);
-            let causal_mask = causal_mask.view(&[1, 1, seq_len, seq_len]);
-
-            // Run through transformer
-            let normed_hidden = self.forward_embeds(&full_sequence, Some(&causal_mask));
-
-            // Predict code 0 from main model (with repetition penalty)
+            let seq_len = normed_hidden.size()[1];
             let code_0 = self.predict_code_0(
                 &normed_hidden,
                 temperature,
@@ -906,58 +910,44 @@ impl TalkerModel {
                 repetition_penalty,
                 &past_code_0s,
             );
-
-            // Track past code 0s for repetition penalty
             past_code_0s.push(code_0);
 
-            // Check EOS on code 0 only
             if code_0 == eos_code {
                 println!("  EOS detected at step {}", step);
                 break;
             }
 
-            // Get main model's normed hidden state at last position for code predictor
-            // (Python: past_hidden = hidden_states[:, -1:, :] where hidden_states = outputs.last_hidden_state after norm)
-            // select(1, idx) on [1, seq_len, H] → [1, H], then unsqueeze(1) → [1, 1, H]
-            let main_hidden = normed_hidden.select(1, seq_len - 1).unsqueeze(1); // [1, 1, hidden_size]
-
-            // Embed code 0 through main codec_embedding
+            let main_hidden = normed_hidden.select(1, seq_len - 1).unsqueeze(1);
             let code_0_tensor = Tensor::from_slice_i64(&[code_0]).to_device(self.device);
             let code_0_embed = self
                 .codec_embedding
                 .index_select(0, &code_0_tensor)
-                .unsqueeze(0); // [1, 1, hidden_size]
+                .unsqueeze(0);
+            let predictor_codes = self.code_predictor.generate_codes(
+                &main_hidden,
+                &code_0_embed,
+                temperature,
+                top_k,
+                &mut code_predictor_caches,
+            );
 
-            // Generate codes 1-15 using code predictor
-            let predictor_codes =
-                self.code_predictor
-                    .generate_codes(&main_hidden, &code_0_embed, temperature, top_k);
-
-            // Collect all 16 codes
             let mut frame_codes = vec![code_0];
             frame_codes.extend_from_slice(&predictor_codes);
             all_codes.push(frame_codes);
 
-            // Build next input: sum of all code embeddings + tts_pad (trailing text)
-            // Code 0 embedding (from main codec_embedding)
             let mut code_embeds_sum = code_0_embed.shallow_clone();
-
-            // Codes 1-15 embeddings (from code predictor embeddings)
             for (i, &code) in predictor_codes.iter().enumerate() {
                 if i < self.code_predictor.code_embeddings.len() {
                     let ct = Tensor::from_slice_i64(&[code]).to_device(self.device);
                     let emb = self.code_predictor.code_embeddings[i]
                         .index_select(0, &ct)
-                        .unsqueeze(0); // [1, 1, hidden_size]
+                        .unsqueeze(0);
                     code_embeds_sum = &code_embeds_sum + &emb;
                 }
             }
 
-            // Add trailing text (tts_pad for non-streaming mode)
             let next_input = &code_embeds_sum + tts_pad_embed;
-
-            // Append to sequence
-            full_sequence = Tensor::cat(&[full_sequence, next_input], 1);
+            normed_hidden = self.forward_embeds_with_cache(&next_input, None, &mut caches);
 
             if step % 10 == 0 {
                 println!("  Generated {} code frames", step + 1);
@@ -1140,10 +1130,7 @@ impl TTSInference {
 
         // Convert tensor to Vec<f32>
         let audio_len = audio_tensor.numel();
-        let waveform = audio_tensor
-            .view(&[audio_len])
-            .to_dtype(DType::Float32)
-            .to_vec_f32();
+        let waveform = audio_tensor.view(&[audio_len]).to_vec_f32();
 
         println!("Decoded {} audio samples", waveform.len());
 
@@ -1743,37 +1730,20 @@ impl TTSInference {
         );
         println!("Generated {} code frames", generated_codes.len());
 
-        // Prepend reference codes to generated codes for joint decoding
-        let ref_len = ref_codes.len();
+        // Decode only generated codes. The reference codes condition the talker
+        // during ICL generation, but the low-latency Python/MLX worker decodes
+        // generated code chunks directly instead of decoding ref+generated and
+        // trimming the reference audio. This keeps vocoder memory bounded.
         let gen_len = generated_codes.len();
-        let total_len = ref_len + gen_len;
-        println!(
-            "Concatenating: {} ref + {} generated = {} total frames",
-            ref_len, gen_len, total_len
-        );
+        println!("Decoding {} generated code frames", gen_len);
 
-        let mut all_codes = Vec::with_capacity(total_len);
-        all_codes.extend_from_slice(ref_codes);
-        all_codes.extend_from_slice(&generated_codes);
-
-        // Decode with vocoder and trim reference portion
         let sample_rate = 24000u32;
         let waveform = if gen_len == 0 {
             println!("Warning: No codes generated, returning silence");
             vec![0.0; sample_rate as usize * 2]
-        } else if let Some(full_waveform) = self.decode_codes_to_audio(&all_codes) {
-            // Trim reference portion from output
-            // cut = ref_len / total_len * waveform_len
-            let cut =
-                (ref_len as f64 / total_len.max(1) as f64 * full_waveform.len() as f64) as usize;
-            println!(
-                "Trimming reference portion: cut {} of {} samples",
-                cut,
-                full_waveform.len()
-            );
-            let trimmed = full_waveform[cut..].to_vec();
-            println!("Final output: {} samples", trimmed.len());
-            trimmed
+        } else if let Some(waveform) = self.decode_codes_to_audio(&generated_codes) {
+            println!("Final output: {} samples", waveform.len());
+            waveform
         } else {
             vec![0.0; sample_rate as usize * 2]
         };
