@@ -10,9 +10,9 @@
 //! Total: 1920x downsample → 12.5 Hz frame rate at 24kHz input
 
 use crate::error::{Qwen3TTSError, Result};
+use crate::tensor::{DType, Device, Tensor};
 use std::collections::HashMap;
 use std::path::Path;
-use crate::tensor::{DType, Device, Tensor};
 
 /// Configuration for the audio encoder.
 #[derive(Debug, Clone)]
@@ -83,9 +83,23 @@ impl CausalConv1d {
         let padding_total = self.kernel_size - self.stride;
         if padding_total > 0 {
             let padded = x.constant_pad_nd(&[padding_total, 0]);
-            padded.conv1d(&self.weight, Some(&self.bias), &[self.stride], &[0], &[1], 1)
+            padded.conv1d(
+                &self.weight,
+                Some(&self.bias),
+                &[self.stride],
+                &[0],
+                &[1],
+                1,
+            )
         } else {
-            x.conv1d(&self.weight, Some(&self.bias), &[self.stride], &[0], &[1], 1)
+            x.conv1d(
+                &self.weight,
+                Some(&self.bias),
+                &[self.stride],
+                &[0],
+                &[1],
+                1,
+            )
         }
     }
 }
@@ -128,9 +142,23 @@ impl EncoderResBlock {
         // ELU → Conv1d(dim→dim/2, k=3, causal pad=2) → ELU → Conv1d(dim/2→dim, k=1, no pad)
         let h = x.elu();
         let h = h.constant_pad_nd(&[2, 0]); // causal pad for k=3, stride=1
-        let h = h.conv1d(&self.conv1_weight, Some(&self.conv1_bias), &[1], &[0], &[1], 1);
+        let h = h.conv1d(
+            &self.conv1_weight,
+            Some(&self.conv1_bias),
+            &[1],
+            &[0],
+            &[1],
+            1,
+        );
         let h = h.elu();
-        let h = h.conv1d(&self.conv2_weight, Some(&self.conv2_bias), &[1], &[0], &[1], 1);
+        let h = h.conv1d(
+            &self.conv2_weight,
+            Some(&self.conv2_bias),
+            &[1],
+            &[0],
+            &[1],
+            1,
+        );
         // Identity shortcut
         x + h
     }
@@ -288,22 +316,15 @@ impl EncoderCodebook {
     /// Returns: codes [batch, seq_len] and quantized [batch, seq_len, dim]
     fn encode(&self, x: &Tensor) -> (Tensor, Tensor) {
         // Compute squared distances: ||x - e||² = ||x||² - 2*x·e + ||e||²
-        let x_sq = x
-            .pow_scalar(2.0)
-            .sum_dim(&[-1i64], true); // [B, T, 1]
-        let e_sq = self
-            .embeddings
-            .pow_scalar(2.0)
-            .sum_dim(&[-1i64], true)
-            .tr(); // [1, codebook_size]
+        let x_sq = x.pow_scalar(2.0).sum_dim(&[-1i64], true); // [B, T, 1]
+        let e_sq = self.embeddings.pow_scalar(2.0).sum_dim(&[-1i64], true).tr(); // [1, codebook_size]
         let dot = x.matmul(&self.embeddings.tr()); // [B, T, codebook_size]
         let distances: Tensor = &x_sq - 2.0 * &dot + &e_sq; // [B, T, codebook_size]
 
         let codes = distances.argmin(-1, false); // [B, T]
 
         // Look up quantized values
-        let quantized =
-            Tensor::embedding(&self.embeddings, &codes.view(&[-1])).view_as(x);
+        let quantized = Tensor::embedding(&self.embeddings, &codes.view(&[-1])).view_as(x);
 
         (codes, quantized)
     }
@@ -655,7 +676,14 @@ impl AudioEncoder {
         // Downsample: Conv1d(512→512, k=4, stride=2) with causal padding
         let pad = 4 - 2; // kernel_size - stride = 2
         let h = h.constant_pad_nd(&[pad, 0]);
-        let h = h.conv1d(&self.downsample_weight, None::<&Tensor>, &[2], &[0], &[1], 1);
+        let h = h.conv1d(
+            &self.downsample_weight,
+            None::<&Tensor>,
+            &[2],
+            &[0],
+            &[1],
+            1,
+        );
         println!("  After downsample: {:?}", h.size());
 
         // Quantize

@@ -7,8 +7,8 @@
 //! discrete audio codes back to waveforms.
 
 use crate::error::{Qwen3TTSError, Result};
-use std::collections::HashMap;
 use crate::tensor::{DType, Device, Tensor};
+use std::collections::HashMap;
 
 /// Configuration for the vocoder decoder.
 #[derive(Debug, Clone)]
@@ -206,7 +206,8 @@ impl ResidualVectorQuantization {
             256
         };
 
-        let mut quantized = Tensor::zeros(&[batch, out_dim, seq_len], DType::Float32, codes.device());
+        let mut quantized =
+            Tensor::zeros(&[batch, out_dim, seq_len], DType::Float32, codes.device());
 
         for (idx, layer) in self.layers.iter().enumerate() {
             let layer_codes = codes.select(0, idx as i64);
@@ -464,9 +465,7 @@ impl VocoderRMSNorm {
 
     /// Forward pass.
     pub fn forward(&self, x: &Tensor) -> Tensor {
-        let variance = x
-            .pow_scalar(2.0)
-            .mean_dim(&[-1], true);
+        let variance = x.pow_scalar(2.0).mean_dim(&[-1], true);
         let x_normed = x * (variance + self.eps).rsqrt();
         &self.weight * x_normed
     }

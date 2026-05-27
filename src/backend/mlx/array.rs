@@ -144,13 +144,7 @@ impl MlxArray {
         let mut res = Self::empty();
         let s = default_stream();
         unsafe {
-            ffi::mlx_zeros(
-                &mut res.ptr,
-                shape.as_ptr(),
-                shape.len(),
-                dtype,
-                s,
-            );
+            ffi::mlx_zeros(&mut res.ptr, shape.as_ptr(), shape.len(), dtype, s);
         }
         res
     }
@@ -160,13 +154,7 @@ impl MlxArray {
         let mut res = Self::empty();
         let s = default_stream();
         unsafe {
-            ffi::mlx_ones(
-                &mut res.ptr,
-                shape.as_ptr(),
-                shape.len(),
-                dtype,
-                s,
-            );
+            ffi::mlx_ones(&mut res.ptr, shape.as_ptr(), shape.len(), dtype, s);
         }
         res
     }
@@ -184,14 +172,7 @@ impl MlxArray {
         let mut res = Self::empty();
         let s = default_stream();
         unsafe {
-            ffi::mlx_full(
-                &mut res.ptr,
-                shape.as_ptr(),
-                shape.len(),
-                val.ptr,
-                dtype,
-                s,
-            );
+            ffi::mlx_full(&mut res.ptr, shape.as_ptr(), shape.len(), val.ptr, dtype, s);
         }
         res
     }

@@ -9,8 +9,8 @@
 
 use crate::config::SpeakerEncoderConfig;
 use crate::error::{Qwen3TTSError, Result};
+use crate::tensor::{DType, Device, Tensor};
 use std::collections::HashMap;
-use crate::tensor::{Tensor, Device, DType};
 
 // Mel spectrogram parameters (from Qwen3 TTS Python reference)
 const MEL_N_FFT: i64 = 1024;
@@ -49,7 +49,14 @@ impl Conv1d {
         // Apply reflect padding first, then convolution with no padding
         // This matches Python's nn.Conv1d(padding="same", padding_mode="reflect")
         let padded = x.reflection_pad1d(&[padding, padding]);
-        padded.conv1d(&self.weight, Some(&self.bias), &[1], &[0], &[dilation], groups)
+        padded.conv1d(
+            &self.weight,
+            Some(&self.bias),
+            &[1],
+            &[0],
+            &[dilation],
+            groups,
+        )
     }
 
     fn forward_no_pad(&self, x: &Tensor) -> Tensor {
@@ -201,8 +208,8 @@ impl Asp {
 
         // Weighted statistics
         let weighted_mean = (x * &attn).sum_dim(&[2i64], false); // [B, C]
-        let weighted_var = ((x - &weighted_mean.unsqueeze(2)).pow_scalar(2.0) * &attn)
-            .sum_dim(&[2i64], false); // [B, C]
+        let weighted_var =
+            ((x - &weighted_mean.unsqueeze(2)).pow_scalar(2.0) * &attn).sum_dim(&[2i64], false); // [B, C]
         let weighted_std = (weighted_var + 1e-6).sqrt();
 
         // Concatenate mean and std → [B, 2C]

@@ -75,10 +75,7 @@ fn main() -> anyhow::Result<()> {
             println!("  {:2}. {} {:?} {:?}", i + 1, name, size, kind);
         }
 
-        let tokenizer_params: i64 = tokenizer_tensors
-            .iter()
-            .map(|(_, t)| t.numel())
-            .sum();
+        let tokenizer_params: i64 = tokenizer_tensors.iter().map(|(_, t)| t.numel()).sum();
         println!(
             "\nSpeech tokenizer parameters: {} ({:.2}M)",
             tokenizer_params,

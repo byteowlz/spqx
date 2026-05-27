@@ -12,11 +12,11 @@
 use crate::audio::{load_audio, AudioInput};
 use crate::config::{GenerationConfig, Qwen3TTSConfig, TTSModelType, TokenizerType};
 use crate::error::{Qwen3TTSError, Result};
+use crate::tensor::{DType, Device, Tensor};
 use crate::tokenizer::Qwen3TTSTokenizer;
 use crate::types::{GenerationOutput, Language, Speaker, VoiceClonePromptItem, VoiceInstruction};
 use std::collections::HashSet;
 use std::path::Path;
-use crate::tensor::{DType, Device, Tensor};
 
 /// Builder for generation parameters.
 #[derive(Debug, Clone, Default)]

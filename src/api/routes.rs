@@ -67,9 +67,7 @@ pub async fn speech(
         )));
     }
     if req.speed < 0.25 || req.speed > 4.0 {
-        return Err(ApiError::bad_request(
-            "Speed must be between 0.25 and 4.0",
-        ));
+        return Err(ApiError::bad_request("Speed must be between 0.25 and 4.0"));
     }
 
     let format = req.response_format.to_lowercase();
@@ -102,10 +100,9 @@ async fn speech_full(
     let format = format.to_string();
     let speed = req.speed;
 
-    let (waveform, sample_rate) =
-        tokio::task::spawn_blocking(move || generate_audio(&state, &req))
-            .await
-            .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
+    let (waveform, sample_rate) = tokio::task::spawn_blocking(move || generate_audio(&state, &req))
+        .await
+        .map_err(|e| ApiError::internal(format!("Task join error: {}", e)))??;
 
     // Apply speed adjustment
     let waveform = apply_speed(&waveform, speed);
@@ -117,10 +114,7 @@ async fn speech_full(
 }
 
 /// Streaming speech generation — returns SSE with base64 PCM chunks.
-async fn speech_stream(
-    state: AppState,
-    req: SpeechRequest,
-) -> Result<Response, ApiError> {
+async fn speech_stream(state: AppState, req: SpeechRequest) -> Result<Response, ApiError> {
     let chunks = chunk_text_streaming(&req.input, FIRST_CHUNK_MAX, REST_CHUNK_MAX);
     if chunks.is_empty() {
         return Err(ApiError::bad_request("Input text produced no chunks"));
@@ -221,7 +215,9 @@ struct CloneData {
 /// to extract codec tokens from the reference audio. The speaker encoder is used for the
 /// x-vector embedding when available; otherwise a zero embedding is used.
 fn prepare_clone_data(state: &AppState, req: &SpeechRequest) -> Result<CloneData, ApiError> {
-    let models = state.lock().map_err(|e| ApiError::internal(e.to_string()))?;
+    let models = state
+        .lock()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let audio_encoder = models.audio_encoder.as_ref().ok_or_else(|| {
         ApiError::bad_request("Voice cloning requires an audio encoder (speech_tokenizer)")
@@ -253,9 +249,9 @@ fn prepare_clone_data(state: &AppState, req: &SpeechRequest) -> Result<CloneData
 
     // Extract speaker embedding if speaker encoder is available, otherwise use zeros
     let speaker_embedding_data = if let Some(speaker_encoder) = &models.speaker_encoder {
-        let emb = speaker_encoder
-            .extract_embedding(&samples)
-            .map_err(|e| ApiError::internal(format!("Speaker embedding extraction failed: {}", e)))?;
+        let emb = speaker_encoder.extract_embedding(&samples).map_err(|e| {
+            ApiError::internal(format!("Speaker embedding extraction failed: {}", e))
+        })?;
         emb.to_vec_f32()
     } else {
         let enc_dim = models.inference.config().speaker_encoder_config.enc_dim;
@@ -277,15 +273,14 @@ fn prepare_clone_data(state: &AppState, req: &SpeechRequest) -> Result<CloneData
 /// Generate audio for text with automatic chunking (non-streaming path).
 fn generate_audio(state: &AppState, req: &SpeechRequest) -> Result<(Vec<f32>, u32), ApiError> {
     let voice = map_voice(&req.voice);
-    let language = req
-        .language
-        .as_deref()
-        .unwrap_or("english");
+    let language = req.language.as_deref().unwrap_or("english");
     let instructions = req.instructions.as_deref().unwrap_or("");
 
     let chunks = chunk_text(&req.input, 400);
 
-    let models = state.lock().map_err(|e| ApiError::internal(e.to_string()))?;
+    let models = state
+        .lock()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     // Pre-process voice cloning data once if needed
     let clone_args = if let Some(audio_b64) = &req.audio_sample {
@@ -353,9 +348,9 @@ fn generate_with_clone(
 
     // Use speaker encoder if available, otherwise zero embedding
     let speaker_embedding = if let Some(speaker_encoder) = &models.speaker_encoder {
-        speaker_encoder
-            .extract_embedding(&samples)
-            .map_err(|e| ApiError::internal(format!("Speaker embedding extraction failed: {}", e)))?
+        speaker_encoder.extract_embedding(&samples).map_err(|e| {
+            ApiError::internal(format!("Speaker embedding extraction failed: {}", e))
+        })?
     } else {
         let enc_dim = models.inference.config().speaker_encoder_config.enc_dim;
         Tensor::from_slice_f32(&vec![0.0f32; enc_dim])
@@ -367,7 +362,16 @@ fn generate_with_clone(
 
     models
         .inference
-        .generate_with_icl(text, ref_text, &ref_codes, &speaker_embedding, language, 0.9, 50, 2048)
+        .generate_with_icl(
+            text,
+            ref_text,
+            &ref_codes,
+            &speaker_embedding,
+            language,
+            0.9,
+            50,
+            2048,
+        )
         .map_err(ApiError::from)
 }
 
@@ -381,14 +385,25 @@ fn generate_chunk_audio(
     speed: f32,
     clone_data: Option<&CloneData>,
 ) -> Result<Vec<u8>, ApiError> {
-    let models = state.lock().map_err(|e| ApiError::internal(e.to_string()))?;
+    let models = state
+        .lock()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let (waveform, _sample_rate) = if let Some(cd) = clone_data {
         // Voice cloning streaming (always ICL)
         let speaker_embedding = Tensor::from_slice_f32(&cd.speaker_embedding_data);
         models
             .inference
-            .generate_with_icl(text, &cd.ref_text, &cd.ref_codes, &speaker_embedding, language, 0.9, 50, 2048)
+            .generate_with_icl(
+                text,
+                &cd.ref_text,
+                &cd.ref_codes,
+                &speaker_embedding,
+                language,
+                0.9,
+                50,
+                2048,
+            )
             .map_err(ApiError::from)?
     } else if !instructions.is_empty() {
         models

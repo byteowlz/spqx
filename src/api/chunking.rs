@@ -194,7 +194,8 @@ mod tests {
 
     #[test]
     fn test_three_chunks_comma_then_sentences() {
-        let text = "Hello there, this is a streaming test. The quick brown fox jumps over the lazy dog.";
+        let text =
+            "Hello there, this is a streaming test. The quick brown fox jumps over the lazy dog.";
         let chunks = chunk_text_streaming(text, 60, 400);
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0], "Hello there,");

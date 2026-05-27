@@ -9,7 +9,11 @@ use crate::error::{Qwen3TTSError, Result};
 /// Encode audio samples to the requested format.
 ///
 /// Returns `(encoded_bytes, content_type)`.
-pub fn encode_audio(samples: &[f32], sample_rate: u32, format: &str) -> Result<(Vec<u8>, &'static str)> {
+pub fn encode_audio(
+    samples: &[f32],
+    sample_rate: u32,
+    format: &str,
+) -> Result<(Vec<u8>, &'static str)> {
     match format {
         "wav" => {
             let bytes = write_wav_bytes(samples, sample_rate)?;
@@ -63,24 +67,23 @@ fn encode_mp3(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
         samples.to_vec()
     };
 
-    let mut builder = Builder::new().ok_or_else(|| {
-        Qwen3TTSError::Audio("Failed to create MP3 encoder".to_string())
-    })?;
-    builder.set_num_channels(1).map_err(|e| {
-        Qwen3TTSError::Audio(format!("MP3 encoder config error: {:?}", e))
-    })?;
-    builder.set_sample_rate(44100).map_err(|e| {
-        Qwen3TTSError::Audio(format!("MP3 encoder config error: {:?}", e))
-    })?;
-    builder.set_brate(mp3lame_encoder::Bitrate::Kbps128).map_err(|e| {
-        Qwen3TTSError::Audio(format!("MP3 encoder config error: {:?}", e))
-    })?;
-    builder.set_quality(mp3lame_encoder::Quality::Best).map_err(|e| {
-        Qwen3TTSError::Audio(format!("MP3 encoder config error: {:?}", e))
-    })?;
-    let mut encoder = builder.build().map_err(|e| {
-        Qwen3TTSError::Audio(format!("Failed to build MP3 encoder: {:?}", e))
-    })?;
+    let mut builder = Builder::new()
+        .ok_or_else(|| Qwen3TTSError::Audio("Failed to create MP3 encoder".to_string()))?;
+    builder
+        .set_num_channels(1)
+        .map_err(|e| Qwen3TTSError::Audio(format!("MP3 encoder config error: {:?}", e)))?;
+    builder
+        .set_sample_rate(44100)
+        .map_err(|e| Qwen3TTSError::Audio(format!("MP3 encoder config error: {:?}", e)))?;
+    builder
+        .set_brate(mp3lame_encoder::Bitrate::Kbps128)
+        .map_err(|e| Qwen3TTSError::Audio(format!("MP3 encoder config error: {:?}", e)))?;
+    builder
+        .set_quality(mp3lame_encoder::Quality::Best)
+        .map_err(|e| Qwen3TTSError::Audio(format!("MP3 encoder config error: {:?}", e)))?;
+    let mut encoder = builder
+        .build()
+        .map_err(|e| Qwen3TTSError::Audio(format!("Failed to build MP3 encoder: {:?}", e)))?;
 
     let pcm: Vec<i16> = samples_44k
         .iter()
@@ -90,13 +93,13 @@ fn encode_mp3(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
     let input = MonoPcm(&pcm);
     let mut mp3_out = Vec::with_capacity(mp3lame_encoder::max_required_buffer_size(pcm.len()));
 
-    encoder.encode_to_vec(input, &mut mp3_out).map_err(|e| {
-        Qwen3TTSError::Audio(format!("MP3 encoding error: {:?}", e))
-    })?;
+    encoder
+        .encode_to_vec(input, &mut mp3_out)
+        .map_err(|e| Qwen3TTSError::Audio(format!("MP3 encoding error: {:?}", e)))?;
 
-    encoder.flush_to_vec::<FlushNoGap>(&mut mp3_out).map_err(|e| {
-        Qwen3TTSError::Audio(format!("MP3 flush error: {:?}", e))
-    })?;
+    encoder
+        .flush_to_vec::<FlushNoGap>(&mut mp3_out)
+        .map_err(|e| Qwen3TTSError::Audio(format!("MP3 flush error: {:?}", e)))?;
 
     Ok(mp3_out)
 }
@@ -189,9 +192,9 @@ fn encode_ogg_opus(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
                 chunk.to_vec()
             };
 
-            let encoded_len = encoder.encode_float(&frame, &mut opus_out).map_err(|e| {
-                Qwen3TTSError::Audio(format!("Opus encoding error: {}", e))
-            })?;
+            let encoded_len = encoder
+                .encode_float(&frame, &mut opus_out)
+                .map_err(|e| Qwen3TTSError::Audio(format!("Opus encoding error: {}", e)))?;
 
             granule += frame_size as u64;
             let end_info = if i == total_frames - 1 {
@@ -201,12 +204,7 @@ fn encode_ogg_opus(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
             };
 
             writer
-                .write_packet(
-                    opus_out[..encoded_len].to_vec(),
-                    serial,
-                    end_info,
-                    granule,
-                )
+                .write_packet(opus_out[..encoded_len].to_vec(), serial, end_info, granule)
                 .map_err(|e| Qwen3TTSError::Audio(format!("OGG write error: {}", e)))?;
         }
     }

@@ -73,7 +73,10 @@ async fn main() -> anyhow::Result<()> {
                 Some(se)
             }
             Err(e) => {
-                tracing::warn!("Speaker encoder not available: {} (voice cloning disabled)", e);
+                tracing::warn!(
+                    "Speaker encoder not available: {} (voice cloning disabled)",
+                    e
+                );
                 None
             }
         }

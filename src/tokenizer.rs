@@ -10,10 +10,10 @@
 use crate::audio::{load_audio, AudioInput};
 use crate::config::TokenizerType;
 use crate::error::{Qwen3TTSError, Result};
+use crate::tensor::{DType, Device, Tensor};
 use crate::types::{DecodedAudio, EncodedAudio};
 use serde::Deserialize;
 use std::path::Path;
-use crate::tensor::{DType, Device, Tensor};
 
 /// Configuration for the speech tokenizer.
 #[derive(Debug, Clone, Deserialize)]
@@ -277,7 +277,8 @@ impl Qwen3TTSTokenizer {
                     }
 
                     if let Some(ref mut mels) = ref_mels {
-                        let mel = Tensor::zeros(&[code_len as i64, 80], DType::Float32, self.device);
+                        let mel =
+                            Tensor::zeros(&[code_len as i64, 80], DType::Float32, self.device);
                         mels.push(mel);
                     }
                 }
