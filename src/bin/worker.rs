@@ -211,6 +211,7 @@ struct Worker {
     max_new_tokens: i64,
     output_sample_rate: u32,
     blocksize: usize,
+    streaming_chunk_size: usize,
 }
 
 impl Worker {
@@ -263,6 +264,7 @@ impl Worker {
             max_new_tokens: args.max_new_tokens,
             output_sample_rate: args.output_sample_rate,
             blocksize: args.blocksize.max(1),
+            streaming_chunk_size: args.streaming_chunk_size.unwrap_or(4).max(1) as usize,
         })
     }
 
@@ -312,7 +314,7 @@ impl Worker {
             "backend": "rust_mlx",
             "model": self.model_name,
             "modelType": "base",
-            "chunkSize": self.streaming_chunk_size(),
+            "chunkSize": self.streaming_chunk_size,
             "maxNewTokens": self.max_new_tokens,
             "temperature": self.temperature,
             "topK": self.top_k,
@@ -322,27 +324,54 @@ impl Worker {
         }));
 
         let started = Instant::now();
-        let samples = self.synthesize(text)?;
-        let elapsed = started.elapsed().as_secs_f64();
-        let chunks = int16_chunks(&samples, self.output_sample_rate, self.blocksize);
-        let audio_samples = chunks.audio_samples;
-        log_json(json!({
-            "type": "ttfa",
-            "seconds": round3(elapsed),
-            "label": "voice_clone_rust"
-        }));
+        let mut streamer = PcmStreamer::new(self.output_sample_rate, self.blocksize);
+        let mut ttfa_logged = false;
+        let mut stream_error: Option<anyhow::Error> = None;
+        let mut cancelled_during_stream = false;
 
-        for chunk in chunks.chunks {
-            if take_cancelled(cancelled, request_id) {
-                log_json(json!({ "type": "request_cancelled", "id": request_id }));
-                writer.write_frame(WORKER_OUTPUT_AUDIO_DONE, request_id, &[])?;
-                clear_mlx_cache();
-                return Ok(());
-            }
-            writer.write_frame(WORKER_OUTPUT_AUDIO_CHUNK, request_id, &i16_bytes(&chunk))?;
+        self.inference.generate_with_icl_streaming(
+            text,
+            &self.ref_text,
+            &self.ref_codes,
+            &self.speaker_embedding,
+            &self.language,
+            self.temperature,
+            self.top_k,
+            self.max_new_tokens,
+            self.streaming_chunk_size,
+            |samples, sample_rate| {
+                if take_cancelled(cancelled, request_id) {
+                    cancelled_during_stream = true;
+                    return false;
+                }
+                if !ttfa_logged {
+                    log_json(json!({
+                        "type": "ttfa",
+                        "seconds": round3(started.elapsed().as_secs_f64()),
+                        "label": "voice_clone_rust"
+                    }));
+                    ttfa_logged = true;
+                }
+                if let Err(error) = streamer.push(samples, sample_rate, request_id, writer) {
+                    stream_error = Some(error);
+                    return false;
+                }
+                true
+            },
+        )?;
+        if let Some(error) = stream_error {
+            return Err(error);
         }
+        if cancelled_during_stream {
+            log_json(json!({ "type": "request_cancelled", "id": request_id }));
+            writer.write_frame(WORKER_OUTPUT_AUDIO_DONE, request_id, &[])?;
+            clear_mlx_cache();
+            return Ok(());
+        }
+        streamer.finish(request_id, writer)?;
 
-        let audio_seconds = audio_samples as f64 / self.output_sample_rate as f64;
+        let elapsed = started.elapsed().as_secs_f64();
+        let audio_seconds = streamer.audio_samples as f64 / self.output_sample_rate as f64;
         log_json(json!({
             "type": "generated",
             "seconds": round3(elapsed),
@@ -355,15 +384,78 @@ impl Worker {
         clear_mlx_cache();
         Ok(())
     }
-
-    fn streaming_chunk_size(&self) -> i64 {
-        4
-    }
 }
 
-struct Int16Chunks {
-    chunks: Vec<Vec<i16>>,
+struct PcmStreamer {
+    output_sample_rate: u32,
+    blocksize: usize,
+    found_speech: bool,
+    leftover: Vec<i16>,
     audio_samples: usize,
+}
+
+impl PcmStreamer {
+    fn new(output_sample_rate: u32, blocksize: usize) -> Self {
+        Self {
+            output_sample_rate,
+            blocksize,
+            found_speech: false,
+            leftover: Vec::new(),
+            audio_samples: 0,
+        }
+    }
+
+    fn push(
+        &mut self,
+        samples: &[f32],
+        sample_rate: u32,
+        request_id: u32,
+        writer: &mut BinaryWriter,
+    ) -> anyhow::Result<()> {
+        let samples = if sample_rate == self.output_sample_rate {
+            samples.to_vec()
+        } else {
+            resample(samples, sample_rate, self.output_sample_rate)?
+        };
+        let mut pcm = samples_to_i16(&samples);
+        if !self.found_speech {
+            let threshold = (32768.0 * 0.01) as i16;
+            if let Some(first_speech) = pcm.iter().position(|sample| sample.abs() > threshold) {
+                let preroll = (self.output_sample_rate as f64 * 0.040) as usize;
+                let start = first_speech.saturating_sub(preroll);
+                pcm.drain(0..start);
+                self.found_speech = true;
+            } else {
+                return Ok(());
+            }
+        }
+
+        if !self.leftover.is_empty() {
+            let mut combined = Vec::with_capacity(self.leftover.len() + pcm.len());
+            combined.append(&mut self.leftover);
+            combined.append(&mut pcm);
+            pcm = combined;
+        }
+
+        let complete = (pcm.len() / self.blocksize) * self.blocksize;
+        for chunk in pcm[..complete].chunks(self.blocksize) {
+            self.audio_samples += chunk.len();
+            writer.write_frame(WORKER_OUTPUT_AUDIO_CHUNK, request_id, &i16_bytes(chunk))?;
+        }
+        self.leftover = pcm[complete..].to_vec();
+        Ok(())
+    }
+
+    fn finish(&mut self, request_id: u32, writer: &mut BinaryWriter) -> anyhow::Result<()> {
+        if self.leftover.is_empty() {
+            return Ok(());
+        }
+        self.audio_samples += self.leftover.len();
+        let mut chunk = std::mem::take(&mut self.leftover);
+        chunk.resize(self.blocksize, 0);
+        writer.write_frame(WORKER_OUTPUT_AUDIO_CHUNK, request_id, &i16_bytes(&chunk))?;
+        Ok(())
+    }
 }
 
 trait ExpandUser {
@@ -554,32 +646,6 @@ fn load_text(
 fn path_str(path: &Path) -> anyhow::Result<&str> {
     path.to_str()
         .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {}", path.display()))
-}
-
-fn int16_chunks(samples: &[f32], output_sample_rate: u32, blocksize: usize) -> Int16Chunks {
-    let mut pcm = samples_to_i16(samples);
-    let threshold = (32768.0 * 0.01) as i16;
-    if let Some(first_speech) = pcm.iter().position(|sample| sample.abs() > threshold) {
-        let preroll = (output_sample_rate as f64 * 0.040) as usize;
-        let start = first_speech.saturating_sub(preroll);
-        pcm.drain(0..start);
-    } else {
-        pcm.clear();
-    }
-
-    let audio_samples = pcm.len();
-    let mut chunks = Vec::new();
-    for chunk in pcm.chunks(blocksize) {
-        let mut padded = chunk.to_vec();
-        if padded.len() < blocksize {
-            padded.resize(blocksize, 0);
-        }
-        chunks.push(padded);
-    }
-    Int16Chunks {
-        chunks,
-        audio_samples,
-    }
 }
 
 fn samples_to_i16(samples: &[f32]) -> Vec<i16> {

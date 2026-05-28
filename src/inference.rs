@@ -842,8 +842,41 @@ impl TalkerModel {
         eos_code: i64,
         tts_pad_embed: &Tensor,
     ) -> Vec<Vec<i64>> {
+        let mut all_codes = Vec::new();
+        self.generate_codes_streaming(
+            input_embeddings,
+            max_codes,
+            temperature,
+            top_k,
+            eos_code,
+            tts_pad_embed,
+            usize::MAX,
+            |chunk| {
+                all_codes.extend_from_slice(chunk);
+                true
+            },
+        );
+        all_codes
+    }
+
+    /// Generate codes and call `on_chunk` every `chunk_size` generated frames.
+    pub fn generate_codes_streaming<F>(
+        &self,
+        input_embeddings: &Tensor,
+        max_codes: i64,
+        temperature: f64,
+        top_k: i64,
+        eos_code: i64,
+        tts_pad_embed: &Tensor,
+        chunk_size: usize,
+        mut on_chunk: F,
+    ) -> Vec<Vec<i64>>
+    where
+        F: FnMut(&[Vec<i64>]) -> bool,
+    {
         let repetition_penalty = 1.05; // From generation_config.json
         let mut all_codes = Vec::new();
+        let mut pending_codes = Vec::new();
         let mut past_code_0s: Vec<i64> = Vec::new();
         let mut caches = (0..self.layers.len())
             .map(|_| KVCache::new())
@@ -862,6 +895,7 @@ impl TalkerModel {
         ]);
         let mut normed_hidden =
             self.forward_embeds_with_cache(input_embeddings, Some(&causal_mask), &mut caches);
+        let chunk_size = chunk_size.max(1);
 
         for step in 0..max_codes {
             let seq_len = normed_hidden.size()[1];
@@ -895,7 +929,8 @@ impl TalkerModel {
 
             let mut frame_codes = vec![code_0];
             frame_codes.extend_from_slice(&predictor_codes);
-            all_codes.push(frame_codes);
+            all_codes.push(frame_codes.clone());
+            pending_codes.push(frame_codes);
 
             let mut code_embeds_sum = code_0_embed.shallow_clone();
             for (i, &code) in predictor_codes.iter().enumerate() {
@@ -911,9 +946,20 @@ impl TalkerModel {
             let next_input = &code_embeds_sum + tts_pad_embed;
             normed_hidden = self.forward_embeds_with_cache(&next_input, None, &mut caches);
 
+            if pending_codes.len() >= chunk_size {
+                if !on_chunk(&pending_codes) {
+                    break;
+                }
+                pending_codes.clear();
+            }
+
             if step % 10 == 0 {
                 println!("  Generated {} code frames", step + 1);
             }
+        }
+
+        if !pending_codes.is_empty() {
+            on_chunk(&pending_codes);
         }
 
         all_codes
@@ -1717,6 +1763,132 @@ impl TTSInference {
         );
 
         Ok((waveform, sample_rate))
+    }
+
+    /// Generate ICL voice clone audio and emit decoded chunks during codec generation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_with_icl_streaming<F>(
+        &self,
+        text: &str,
+        ref_text: &str,
+        ref_codes: &[Vec<i64>],
+        speaker_embedding: &Tensor,
+        language: &str,
+        temperature: f64,
+        top_k: i64,
+        max_codes: i64,
+        chunk_size: usize,
+        mut on_audio: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&[f32], u32) -> bool,
+    {
+        let language_id = self
+            .config
+            .talker_config
+            .codec_language_id
+            .as_ref()
+            .and_then(|map| map.get(&language.to_lowercase()))
+            .copied()
+            .unwrap_or(0) as i64;
+
+        let codec_eos_id = self.config.talker_config.codec_eos_token_id as i64;
+        let codec_think_id = self.config.talker_config.codec_think_id as i64;
+        let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
+        let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
+        let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
+        let codec_bos_id = self.config.talker_config.codec_bos_id as i64;
+        let tts_pad_id = self.config.tts_pad_token_id as i64;
+        let tts_bos_id = self.config.tts_bos_token_id as i64;
+        let tts_eos_id = self.config.tts_eos_token_id as i64;
+
+        println!(
+            "ICL voice clone: Language: {} (id={})",
+            language, language_id
+        );
+        println!("  Reference text: \"{}\"", ref_text);
+        println!("  Synthesis text: \"{}\"", text);
+        println!("  Reference codec frames: {}", ref_codes.len());
+
+        let im_start = self.config.im_start_token_id as i64;
+        let im_end = self.config.im_end_token_id as i64;
+        let assistant_id = self.config.assistant_token_id as i64;
+        let newline_tokens = self.tokenize("\n")?;
+        let newline_id = newline_tokens.first().copied().unwrap_or(198) as i64;
+
+        let ref_text_tokens = self.tokenize(ref_text)?;
+        let ref_text_ids: Vec<i64> = ref_text_tokens.iter().map(|&id| id as i64).collect();
+        let mut ref_token_ids = vec![im_start, assistant_id, newline_id];
+        ref_token_ids.extend_from_slice(&ref_text_ids);
+        ref_token_ids.extend_from_slice(&[im_end, newline_id]);
+
+        let synth_tokens = self.tokenize(text)?;
+        let synth_ids: Vec<i64> = synth_tokens.iter().map(|&id| id as i64).collect();
+        let mut synth_token_ids = vec![im_start, assistant_id, newline_id];
+        synth_token_ids.extend_from_slice(&synth_ids);
+        synth_token_ids.extend_from_slice(&[
+            im_end,
+            newline_id,
+            im_start,
+            assistant_id,
+            newline_id,
+        ]);
+
+        println!(
+            "  ref_text tokens: {}, synth_text tokens: {}",
+            ref_token_ids.len(),
+            synth_token_ids.len()
+        );
+        println!("Building ICL input embeddings...");
+        let input_embeddings = self.talker.build_input_embeddings_with_icl(
+            &ref_token_ids,
+            &synth_token_ids,
+            ref_codes,
+            speaker_embedding,
+            language_id,
+            tts_pad_id,
+            tts_bos_id,
+            tts_eos_id,
+            codec_think_id,
+            codec_think_bos_id,
+            codec_think_eos_id,
+            codec_pad_id,
+            codec_bos_id,
+        );
+        let tts_pad_embed = self.talker.embed_text(&[tts_pad_id]);
+
+        println!(
+            "Generating audio codes (temp={}, top_k={}, max={}, chunk={})...",
+            temperature,
+            top_k,
+            max_codes,
+            chunk_size.max(1)
+        );
+        let sample_rate = 24000u32;
+        let mut generated = 0usize;
+        let mut should_continue = true;
+        self.talker.generate_codes_streaming(
+            &input_embeddings,
+            max_codes,
+            temperature,
+            top_k,
+            codec_eos_id,
+            &tts_pad_embed,
+            chunk_size,
+            |code_chunk| {
+                if !should_continue || code_chunk.is_empty() {
+                    return should_continue;
+                }
+                generated += code_chunk.len();
+                println!("Decoding {} generated code frames", code_chunk.len());
+                if let Some(waveform) = self.decode_codes_to_audio(code_chunk) {
+                    should_continue = on_audio(&waveform, sample_rate);
+                }
+                should_continue
+            },
+        );
+        println!("Generated {} streamed code frames", generated);
+        Ok(())
     }
 }
 
