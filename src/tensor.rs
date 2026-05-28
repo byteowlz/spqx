@@ -1139,12 +1139,16 @@ impl Tensor {
         dilation: &[i64],
         groups: i64,
     ) -> Self {
-        // MLX conv1d expects input [N, L, C_in], weight [C_out, K, C_in]
-        // PyTorch expects input [N, C_in, L], weight [C_out, C_in, K]
-        // We need to transpose input and weight, then transpose output back.
-        let input_t = self.transpose(1, 2); // [N, C_in, L] -> [N, L, C_in]
-                                            // Weight transpose: [C_out, C_in, K] -> [C_out, K, C_in]
-        let weight_t = weight.transpose(1, 2);
+        // MLX conv1d expects input [N, L, C_in], weight [C_out, K, C_in].
+        // PyTorch-origin weights use [C_out, C_in, K], so transpose those.
+        let input_t = self.transpose(1, 2);
+        let input_channels_per_group = self.size()[1] / groups;
+        let weight_shape = weight.size();
+        let weight_t = if weight_shape.len() == 3 && weight_shape[1] == input_channels_per_group {
+            weight.transpose(1, 2)
+        } else {
+            weight.shallow_clone()
+        };
         let result = crate::backend::mlx::ops::conv1d(
             &input_t.inner,
             &weight_t.inner,
@@ -1153,9 +1157,7 @@ impl Tensor {
             dilation[0] as i32,
             groups as i32,
         );
-        // Transpose output back: [N, L_out, C_out] -> [N, C_out, L_out]
-        let out = Tensor::from_mlx(result);
-        let out = out.transpose(1, 2);
+        let out = Tensor::from_mlx(result).transpose(1, 2);
         if let Some(b) = bias {
             &out + &b.unsqueeze(-1)
         } else {

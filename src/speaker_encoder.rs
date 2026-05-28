@@ -43,7 +43,13 @@ impl Conv1d {
     }
 
     fn forward(&self, x: &Tensor, dilation: i64, groups: i64) -> Tensor {
-        let kernel_size = self.weight.size()[2];
+        let weight_shape = self.weight.size();
+        let input_channels = x.size()[1] / groups;
+        let kernel_size = if weight_shape.len() == 3 && weight_shape[2] == input_channels {
+            weight_shape[1]
+        } else {
+            weight_shape[2]
+        };
         // Calculate padding to maintain sequence length (same padding with reflect mode)
         let padding = (kernel_size - 1) * dilation / 2;
         // Apply reflect padding first, then convolution with no padding

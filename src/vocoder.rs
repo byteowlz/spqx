@@ -356,8 +356,6 @@ pub struct CausalConv1d {
     dilation: i64,
     /// Groups
     groups: i64,
-    /// Padding amount (left side)
-    padding: i64,
 }
 
 impl CausalConv1d {
@@ -369,24 +367,29 @@ impl CausalConv1d {
         dilation: i64,
         groups: i64,
     ) -> Self {
-        let kernel_size = weight.size()[2];
-        let effective_kernel_size = (kernel_size - 1) * dilation + 1;
-        let padding = effective_kernel_size - stride;
-
         Self {
             weight,
             bias,
             stride,
             dilation,
             groups,
-            padding,
         }
     }
 
     /// Forward pass with causal padding.
     pub fn forward(&self, x: &Tensor) -> Tensor {
+        let weight_shape = self.weight.size();
+        let input_channels_per_group = x.size()[1] / self.groups;
+        let kernel_size = if weight_shape.len() == 3 && weight_shape[2] == input_channels_per_group
+        {
+            weight_shape[1]
+        } else {
+            weight_shape[2]
+        };
+        let effective_kernel_size = (kernel_size - 1) * self.dilation + 1;
+        let padding = effective_kernel_size - self.stride;
         // Apply causal padding (left-side only)
-        let padded = x.constant_pad_nd(&[self.padding, 0]);
+        let padded = x.constant_pad_nd(&[padding, 0]);
 
         padded.conv1d(
             &self.weight,

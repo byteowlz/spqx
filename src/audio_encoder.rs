@@ -58,18 +58,15 @@ struct CausalConv1d {
     weight: Tensor,
     bias: Tensor,
     stride: i64,
-    kernel_size: i64,
 }
 
 impl CausalConv1d {
     fn from_weights(weight: Tensor, bias: Tensor) -> Self {
-        let kernel_size = weight.size()[2];
         let stride = 1; // Default; overridden by strided convs
         Self {
             weight,
             bias,
             stride,
-            kernel_size,
         }
     }
 
@@ -80,7 +77,14 @@ impl CausalConv1d {
 
     /// Forward pass with causal (left) padding.
     fn forward(&self, x: &Tensor) -> Tensor {
-        let padding_total = self.kernel_size - self.stride;
+        let weight_shape = self.weight.size();
+        let input_channels = x.size()[1];
+        let kernel_size = if weight_shape.len() == 3 && weight_shape[2] == input_channels {
+            weight_shape[1]
+        } else {
+            weight_shape[2]
+        };
+        let padding_total = kernel_size - self.stride;
         if padding_total > 0 {
             let padded = x.constant_pad_nd(&[padding_total, 0]);
             padded.conv1d(

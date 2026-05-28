@@ -75,6 +75,16 @@ impl RMSNorm {
 pub struct Linear {
     weight: Tensor,
     bias: Option<Tensor>,
+    #[cfg(feature = "mlx")]
+    quantization: Option<QuantizedLinear>,
+}
+
+#[cfg(feature = "mlx")]
+struct QuantizedLinear {
+    scales: Tensor,
+    biases: Option<Tensor>,
+    group_size: i32,
+    bits: i32,
 }
 
 impl Linear {
@@ -88,31 +98,106 @@ impl Linear {
             &[out_features, in_features],
             nn::Init::Uniform { lo: -std, up: std },
         );
-        Self {
-            weight: Tensor::from_tch(weight),
-            bias: None,
-        }
+        Self::from_weights(Tensor::from_tch(weight))
     }
 
     /// Load Linear from pre-loaded weight tensor (no bias).
     pub fn from_weights(weight: Tensor) -> Self {
-        Self {
-            weight: linear_weight(weight),
-            bias: None,
-        }
+        Self::from_parts(weight, None, None, None)
     }
 
     /// Load Linear from pre-loaded weight and bias tensors.
     pub fn from_weights_with_bias(weight: Tensor, bias: Tensor) -> Self {
-        Self {
-            weight: linear_weight(weight),
-            bias: Some(linear_weight(bias)),
+        Self::from_parts(weight, Some(bias), None, None)
+    }
+
+    /// Load Linear from `prefix.weight`, optional `prefix.bias`, and optional MLX quantization tensors.
+    pub fn from_weight_map(
+        weights: &HashMap<String, Tensor>,
+        prefix: &str,
+        device: Device,
+    ) -> Option<Self> {
+        let weight = weights.get(&format!("{prefix}.weight"))?.to_device(device);
+        let bias = weights
+            .get(&format!("{prefix}.bias"))
+            .map(|tensor| tensor.to_device(device).to_dtype(DType::Float32));
+        #[cfg(feature = "mlx")]
+        {
+            let scales = weights
+                .get(&format!("{prefix}.scales"))
+                .map(|tensor| tensor.to_device(device));
+            let quant_biases = weights
+                .get(&format!("{prefix}.biases"))
+                .map(|tensor| tensor.to_device(device));
+            return Some(Self::from_parts(weight, bias, scales, quant_biases));
+        }
+        #[cfg(not(feature = "mlx"))]
+        {
+            Some(Self::from_parts(weight, bias, None, None))
+        }
+    }
+
+    fn from_parts(
+        weight: Tensor,
+        bias: Option<Tensor>,
+        #[cfg(feature = "mlx")] scales: Option<Tensor>,
+        #[cfg(feature = "mlx")] quant_biases: Option<Tensor>,
+        #[cfg(not(feature = "mlx"))] _scales: Option<Tensor>,
+        #[cfg(not(feature = "mlx"))] _quant_biases: Option<Tensor>,
+    ) -> Self {
+        #[cfg(feature = "mlx")]
+        {
+            if let Some(scales) = scales {
+                let quantization =
+                    infer_quantization(&weight, &scales).map(|(group_size, bits)| {
+                        QuantizedLinear {
+                            scales,
+                            biases: quant_biases,
+                            group_size,
+                            bits,
+                        }
+                    });
+                return Self {
+                    weight,
+                    bias,
+                    quantization,
+                };
+            }
+            Self {
+                weight: weight.to_dtype(DType::Float32),
+                bias,
+                quantization: None,
+            }
+        }
+        #[cfg(not(feature = "mlx"))]
+        {
+            Self {
+                weight: linear_weight(weight),
+                bias: bias.map(linear_weight),
+            }
         }
     }
 
     /// Apply linear transformation: x @ W^T + bias.
     pub fn forward(&self, x: &Tensor) -> Tensor {
+        #[cfg(feature = "mlx")]
+        let out = if let Some(quantization) = &self.quantization {
+            Tensor::from_mlx(mlx::ops::quantized_matmul(
+                x.as_mlx(),
+                self.weight.as_mlx(),
+                quantization.scales.as_mlx(),
+                quantization.biases.as_ref().map(|biases| biases.as_mlx()),
+                true,
+                quantization.group_size,
+                quantization.bits,
+                "affine",
+            ))
+        } else {
+            x.matmul(&self.weight.tr())
+        };
+        #[cfg(not(feature = "mlx"))]
         let out = x.matmul(&self.weight.tr());
+
         if let Some(ref bias) = self.bias {
             &out + bias
         } else {
@@ -122,8 +207,24 @@ impl Linear {
 }
 
 #[cfg(feature = "mlx")]
-fn linear_weight(weight: Tensor) -> Tensor {
-    weight
+fn infer_quantization(weight: &Tensor, scales: &Tensor) -> Option<(i32, i32)> {
+    let weight_shape = weight.size();
+    let scale_shape = scales.size();
+    if weight_shape.len() != 2 || scale_shape.len() != 2 || scale_shape[1] == 0 {
+        return None;
+    }
+    let group_size = 64;
+    let numerator = weight_shape[1] * 32;
+    let denominator = scale_shape[1] * group_size;
+    if numerator % denominator != 0 {
+        return None;
+    }
+    let bits = numerator / denominator;
+    if matches!(bits, 2 | 3 | 4 | 6 | 8) {
+        Some((group_size as i32, bits as i32))
+    } else {
+        None
+    }
 }
 
 #[cfg(not(feature = "mlx"))]
@@ -428,22 +529,10 @@ impl Attention {
         head_dim: i64,
         device: Device,
     ) -> Option<Self> {
-        let q_proj = weights
-            .get(&format!("{}.q_proj.weight", prefix))?
-            .to_device(device)
-            .to_dtype(DType::Float32);
-        let k_proj = weights
-            .get(&format!("{}.k_proj.weight", prefix))?
-            .to_device(device)
-            .to_dtype(DType::Float32);
-        let v_proj = weights
-            .get(&format!("{}.v_proj.weight", prefix))?
-            .to_device(device)
-            .to_dtype(DType::Float32);
-        let o_proj = weights
-            .get(&format!("{}.o_proj.weight", prefix))?
-            .to_device(device)
-            .to_dtype(DType::Float32);
+        let q_proj = Linear::from_weight_map(weights, &format!("{prefix}.q_proj"), device)?;
+        let k_proj = Linear::from_weight_map(weights, &format!("{prefix}.k_proj"), device)?;
+        let v_proj = Linear::from_weight_map(weights, &format!("{prefix}.v_proj"), device)?;
+        let o_proj = Linear::from_weight_map(weights, &format!("{prefix}.o_proj"), device)?;
 
         // Load Q/K norm if present
         let q_norm = weights
@@ -454,10 +543,10 @@ impl Attention {
             .map(|t| t.to_device(device));
 
         Some(Self {
-            q_proj: Linear::from_weights(q_proj),
-            k_proj: Linear::from_weights(k_proj),
-            v_proj: Linear::from_weights(v_proj),
-            o_proj: Linear::from_weights(o_proj),
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
             q_norm,
             k_norm,
             num_heads,
@@ -821,23 +910,10 @@ impl MLP {
         prefix: &str,
         device: Device,
     ) -> Option<Self> {
-        let gate_proj = weights
-            .get(&format!("{}.gate_proj.weight", prefix))?
-            .to_device(device)
-            .to_dtype(DType::Float32);
-        let up_proj = weights
-            .get(&format!("{}.up_proj.weight", prefix))?
-            .to_device(device)
-            .to_dtype(DType::Float32);
-        let down_proj = weights
-            .get(&format!("{}.down_proj.weight", prefix))?
-            .to_device(device)
-            .to_dtype(DType::Float32);
-
         Some(Self {
-            gate_proj: Linear::from_weights(gate_proj),
-            up_proj: Linear::from_weights(up_proj),
-            down_proj: Linear::from_weights(down_proj),
+            gate_proj: Linear::from_weight_map(weights, &format!("{prefix}.gate_proj"), device)?,
+            up_proj: Linear::from_weight_map(weights, &format!("{prefix}.up_proj"), device)?,
+            down_proj: Linear::from_weight_map(weights, &format!("{prefix}.down_proj"), device)?,
         })
     }
 

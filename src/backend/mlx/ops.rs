@@ -7,6 +7,7 @@
 use super::array::MlxArray;
 use super::ffi;
 use super::stream::default_stream;
+use std::ffi::CString;
 
 // ---------------------------------------------------------------------------
 // Arithmetic
@@ -79,6 +80,43 @@ pub fn clip(a: &MlxArray, min: &MlxArray, max: &MlxArray) -> MlxArray {
 pub fn matmul(a: &MlxArray, b: &MlxArray) -> MlxArray {
     let mut res = MlxArray::empty();
     unsafe { ffi::mlx_matmul(&mut res.ptr, a.ptr, b.ptr, default_stream()) };
+    res
+}
+
+pub fn quantized_matmul(
+    x: &MlxArray,
+    weight: &MlxArray,
+    scales: &MlxArray,
+    biases: Option<&MlxArray>,
+    transpose: bool,
+    group_size: i32,
+    bits: i32,
+    mode: &str,
+) -> MlxArray {
+    let mut res = MlxArray::empty();
+    let mode = CString::new(mode).expect("quantization mode contains NUL");
+    let group_size = ffi::mlx_optional_int {
+        value: group_size,
+        has_value: true,
+    };
+    let bits = ffi::mlx_optional_int {
+        value: bits,
+        has_value: true,
+    };
+    unsafe {
+        ffi::mlx_quantized_matmul(
+            &mut res.ptr,
+            x.ptr,
+            weight.ptr,
+            scales.ptr,
+            biases.map_or(std::ptr::null_mut(), |biases| biases.ptr),
+            transpose,
+            group_size,
+            bits,
+            mode.as_ptr(),
+            default_stream(),
+        );
+    }
     res
 }
 

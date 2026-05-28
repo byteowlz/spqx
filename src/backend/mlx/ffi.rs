@@ -79,6 +79,16 @@ pub enum mlx_device_type {
     MLX_GPU = 1,
 }
 
+/// Optional int value (matches mlx_optional_int_ struct).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct mlx_optional_int {
+    /// The int value.
+    pub value: c_int,
+    /// Whether the value is present.
+    pub has_value: bool,
+}
+
 /// Optional float value (matches mlx_optional_float_ struct).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -198,6 +208,19 @@ extern "C" {
 
     // Matrix multiplication
     pub fn mlx_matmul(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) -> c_int;
+
+    pub fn mlx_quantized_matmul(
+        res: *mut mlx_array,
+        x: mlx_array,
+        w: mlx_array,
+        scales: mlx_array,
+        biases: mlx_array,
+        transpose: bool,
+        group_size: mlx_optional_int,
+        bits: mlx_optional_int,
+        mode: *const c_char,
+        s: mlx_stream,
+    ) -> c_int;
 
     // Shape manipulation
     pub fn mlx_reshape(

@@ -110,33 +110,22 @@ impl CodePredictor {
         // Load LM heads (15 for codes 1-15)
         let mut lm_heads = Vec::new();
         for i in 0..(num_code_groups - 1) {
-            let key = format!("talker.code_predictor.lm_head.{}.weight", i);
-            if let Some(tensor) = weights.get(&key) {
-                lm_heads.push(Linear::from_weights(
-                    tensor.to_device(device).to_dtype(DType::Float32),
-                ));
+            let prefix = format!("talker.code_predictor.lm_head.{i}");
+            if let Some(head) = Linear::from_weight_map(weights, &prefix, device) {
+                lm_heads.push(head);
             }
         }
         println!("  Loaded {} code_predictor LM heads", lm_heads.len());
 
         // Load optional small_to_mtp_projection (present in 1.7B+ models)
-        let small_to_mtp_projection = if let Some(proj_weight) =
-            weights.get("talker.code_predictor.small_to_mtp_projection.weight")
-        {
-            let proj_bias = weights.get("talker.code_predictor.small_to_mtp_projection.bias");
-            let proj = if let Some(bias) = proj_bias {
-                Linear::from_weights_with_bias(
-                    proj_weight.to_device(device).to_dtype(DType::Float32),
-                    bias.to_device(device).to_dtype(DType::Float32),
-                )
-            } else {
-                Linear::from_weights(proj_weight.to_device(device).to_dtype(DType::Float32))
-            };
+        let small_to_mtp_projection = Linear::from_weight_map(
+            weights,
+            "talker.code_predictor.small_to_mtp_projection",
+            device,
+        );
+        if small_to_mtp_projection.is_some() {
             println!("  Loaded small_to_mtp_projection");
-            Some(proj)
-        } else {
-            None
-        };
+        }
 
         // Create rotary embedding
         let rotary_emb = RotaryEmbedding::new(
@@ -254,11 +243,9 @@ pub struct TalkerModel {
     /// Text embedding layer [151936, 2048]
     text_embedding: Tensor,
     /// Text projection FC1 (2048 -> 2048)
-    text_proj_fc1_weight: Tensor,
-    text_proj_fc1_bias: Tensor,
+    text_proj_fc1: Linear,
     /// Text projection FC2 (2048 -> 1024)
-    text_proj_fc2_weight: Tensor,
-    text_proj_fc2_bias: Tensor,
+    text_proj_fc2: Linear,
     /// Main codec embedding [3072, 1024]
     codec_embedding: Tensor,
     /// Transformer layers (28 layers)
@@ -314,34 +301,16 @@ impl TalkerModel {
         println!("  Loaded text_embedding: {:?}", text_embedding.size());
 
         // Load text projection layers (2048 -> 1024)
-        let text_proj_fc1_weight = weights
-            .get("talker.text_projection.linear_fc1.weight")
-            .ok_or_else(|| {
-                Qwen3TTSError::ModelLoad("Missing text_projection.linear_fc1.weight".into())
-            })?
-            .to_device(device)
-            .to_dtype(DType::Float32);
-        let text_proj_fc1_bias = weights
-            .get("talker.text_projection.linear_fc1.bias")
-            .ok_or_else(|| {
-                Qwen3TTSError::ModelLoad("Missing text_projection.linear_fc1.bias".into())
-            })?
-            .to_device(device)
-            .to_dtype(DType::Float32);
-        let text_proj_fc2_weight = weights
-            .get("talker.text_projection.linear_fc2.weight")
-            .ok_or_else(|| {
-                Qwen3TTSError::ModelLoad("Missing text_projection.linear_fc2.weight".into())
-            })?
-            .to_device(device)
-            .to_dtype(DType::Float32);
-        let text_proj_fc2_bias = weights
-            .get("talker.text_projection.linear_fc2.bias")
-            .ok_or_else(|| {
-                Qwen3TTSError::ModelLoad("Missing text_projection.linear_fc2.bias".into())
-            })?
-            .to_device(device)
-            .to_dtype(DType::Float32);
+        let text_proj_fc1 =
+            Linear::from_weight_map(weights, "talker.text_projection.linear_fc1", device)
+                .ok_or_else(|| {
+                    Qwen3TTSError::ModelLoad("Missing text_projection.linear_fc1".into())
+                })?;
+        let text_proj_fc2 =
+            Linear::from_weight_map(weights, "talker.text_projection.linear_fc2", device)
+                .ok_or_else(|| {
+                    Qwen3TTSError::ModelLoad("Missing text_projection.linear_fc2".into())
+                })?;
         println!("  Loaded text_projection layers");
 
         // Load main codec embedding [3072, 1024]
@@ -386,12 +355,8 @@ impl TalkerModel {
         println!("  Loaded final norm");
 
         // Load codec_head for predicting code 0
-        let codec_head_weight = weights
-            .get("talker.codec_head.weight")
-            .ok_or_else(|| Qwen3TTSError::ModelLoad("Missing talker.codec_head.weight".into()))?
-            .to_device(device)
-            .to_dtype(DType::Float32);
-        let codec_head = Linear::from_weights(codec_head_weight);
+        let codec_head = Linear::from_weight_map(weights, "talker.codec_head", device)
+            .ok_or_else(|| Qwen3TTSError::ModelLoad("Missing talker.codec_head".into()))?;
         println!("  Loaded codec_head");
 
         // Load code predictor sub-transformer
@@ -408,10 +373,8 @@ impl TalkerModel {
 
         Ok(Self {
             text_embedding,
-            text_proj_fc1_weight,
-            text_proj_fc1_bias,
-            text_proj_fc2_weight,
-            text_proj_fc2_bias,
+            text_proj_fc1,
+            text_proj_fc2,
             codec_embedding,
             layers,
             norm,
@@ -429,9 +392,8 @@ impl TalkerModel {
         let embedded = self.text_embedding.index_select(0, &ids); // [N, 2048]
 
         // Text projection: FC1(2048→2048) with GELU, then FC2(2048→1024)
-        let h = embedded.matmul(&self.text_proj_fc1_weight.tr()) + &self.text_proj_fc1_bias;
-        let h = h.gelu();
-        let projected = h.matmul(&self.text_proj_fc2_weight.tr()) + &self.text_proj_fc2_bias;
+        let h = self.text_proj_fc1.forward(&embedded).gelu();
+        let projected = self.text_proj_fc2.forward(&h);
 
         projected.unsqueeze(0) // [1, N, 1024]
     }
