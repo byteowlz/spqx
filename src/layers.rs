@@ -32,7 +32,11 @@ impl RMSNorm {
 
     /// Load RMSNorm from pre-loaded weights.
     pub fn from_weights(weight: Tensor, eps: f64) -> Self {
-        Self { weight, eps }
+        // Convert to float32 for stable computation
+        Self {
+            weight: weight.to_dtype(DType::Float32),
+            eps,
+        }
     }
 
     /// Apply RMS normalization.
@@ -116,7 +120,7 @@ impl Linear {
         let weight = weights.get(&format!("{prefix}.weight"))?.to_device(device);
         let bias = weights
             .get(&format!("{prefix}.bias"))
-            .map(|tensor| tensor.to_device(device));
+            .map(|tensor| tensor.to_device(device).to_dtype(DType::Float32));
         #[cfg(feature = "mlx")]
         {
             let scales = weights
@@ -125,31 +129,6 @@ impl Linear {
             let quant_biases = weights
                 .get(&format!("{prefix}.biases"))
                 .map(|tensor| tensor.to_device(device));
-            if std::env::var("QWEN3_TTS_DEQUANTIZE_CODE_PREDICTOR")
-                .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
-                .unwrap_or(false)
-                && prefix.contains("code_predictor")
-            {
-                if let Some(scales) = &scales {
-                    if let Some((group_size, bits)) = infer_quantization(&weight, scales) {
-                        let dequantized = Tensor::from_mlx(mlx::ops::dequantize(
-                            weight.as_mlx(),
-                            scales.as_mlx(),
-                            quant_biases.as_ref().map(|biases| biases.as_mlx()),
-                            group_size,
-                            bits,
-                            "affine",
-                            DType::BFloat16.into(),
-                        ));
-                        dequantized.as_mlx().eval();
-                        return Some(Self {
-                            weight: dequantized,
-                            bias,
-                            quantization: None,
-                        });
-                    }
-                }
-            }
             return Some(Self::from_parts(weight, bias, scales, quant_biases));
         }
         #[cfg(not(feature = "mlx"))]
@@ -185,7 +164,7 @@ impl Linear {
                 };
             }
             Self {
-                weight,
+                weight: weight.to_dtype(DType::Float32),
                 bias,
                 quantization: None,
             }
@@ -614,68 +593,48 @@ impl Attention {
             .view(&[batch_size, seq_len, self.num_kv_heads, self.head_dim])
             .transpose(1, 2);
 
-        // Apply Q/K normalization if present (RMS norm per head).
-        // Use MLX's fused RMS norm instead of decomposing into pow/mean/sqrt/div/mul.
+        // Apply Q/K normalization if present (RMS norm per head)
+        // Qwen3 QK norm weights have shape [num_heads, head_dim] and need to be reshaped
         let query = if let Some(ref q_norm) = self.q_norm {
+            let eps = 1e-6;
+            let variance = query.pow_scalar(2.0).mean_dim(&[-1], true);
+            let rms = (variance + eps).sqrt().clamp_min(1e-8);
+            let normalized = query / rms;
+            // q_norm is [num_heads * head_dim], reshape to [1, num_heads, 1, head_dim] for broadcasting
             let q_norm_shape = q_norm.size();
-            if q_norm_shape.len() == 1 && q_norm_shape[0] == self.head_dim {
-                #[cfg(feature = "mlx")]
-                {
-                    Tensor::from_mlx(mlx::ops::fast_rms_norm(
-                        query.as_mlx(),
-                        q_norm.as_mlx(),
-                        1e-6,
-                    ))
-                    .to_dtype(query.kind())
-                }
-                #[cfg(not(feature = "mlx"))]
-                {
-                    let variance = query.pow_scalar(2.0).mean_dim(&[-1], true);
-                    let rms = (variance + 1e-6).sqrt().clamp_min(1e-8);
-                    (query / rms) * q_norm
-                }
+            if q_norm_shape.len() == 1 && q_norm_shape[0] == self.num_heads * self.head_dim {
+                // Reshape from [num_heads * head_dim] to [1, num_heads, 1, head_dim]
+                let q_norm_reshaped = q_norm.view(&[1, self.num_heads, 1, self.head_dim]);
+                normalized * q_norm_reshaped
+            } else if q_norm_shape.len() == 1 && q_norm_shape[0] == self.head_dim {
+                // Shape is [head_dim], broadcast directly
+                normalized * q_norm
             } else {
-                let weight = if q_norm_shape.len() == 1
-                    && q_norm_shape[0] == self.num_heads * self.head_dim
-                {
-                    q_norm.view(&[1, self.num_heads, 1, self.head_dim])
-                } else {
-                    println!("Warning: Unexpected q_norm shape {:?}", q_norm_shape);
-                    q_norm.shallow_clone()
-                };
-                let variance = query.pow_scalar(2.0).mean_dim(&[-1], true);
-                let rms = (variance + 1e-6).sqrt().clamp_min(1e-8);
-                (query / rms) * weight
+                // Unknown shape, skip norm
+                println!("Warning: Unexpected q_norm shape {:?}", q_norm_shape);
+                normalized
             }
         } else {
             query
         };
         let key = if let Some(ref k_norm) = self.k_norm {
+            let eps = 1e-6;
+            let variance = key.pow_scalar(2.0).mean_dim(&[-1], true);
+            let rms = (variance + eps).sqrt().clamp_min(1e-8);
+            let normalized = key / rms;
+            // k_norm might be [num_kv_heads * head_dim] for GQA
             let k_norm_shape = k_norm.size();
-            if k_norm_shape.len() == 1 && k_norm_shape[0] == self.head_dim {
-                #[cfg(feature = "mlx")]
-                {
-                    Tensor::from_mlx(mlx::ops::fast_rms_norm(key.as_mlx(), k_norm.as_mlx(), 1e-6))
-                        .to_dtype(key.kind())
-                }
-                #[cfg(not(feature = "mlx"))]
-                {
-                    let variance = key.pow_scalar(2.0).mean_dim(&[-1], true);
-                    let rms = (variance + 1e-6).sqrt().clamp_min(1e-8);
-                    (key / rms) * k_norm
-                }
+            if k_norm_shape.len() == 1 && k_norm_shape[0] == self.num_kv_heads * self.head_dim {
+                // Reshape from [num_kv_heads * head_dim] to [1, num_kv_heads, 1, head_dim]
+                let k_norm_reshaped = k_norm.view(&[1, self.num_kv_heads, 1, self.head_dim]);
+                normalized * k_norm_reshaped
+            } else if k_norm_shape.len() == 1 && k_norm_shape[0] == self.head_dim {
+                // Shape is [head_dim], broadcast directly
+                normalized * k_norm
             } else {
-                let weight = if k_norm_shape.len() == 1
-                    && k_norm_shape[0] == self.num_kv_heads * self.head_dim
-                {
-                    k_norm.view(&[1, self.num_kv_heads, 1, self.head_dim])
-                } else {
-                    println!("Warning: Unexpected k_norm shape {:?}", k_norm_shape);
-                    k_norm.shallow_clone()
-                };
-                let variance = key.pow_scalar(2.0).mean_dim(&[-1], true);
-                let rms = (variance + 1e-6).sqrt().clamp_min(1e-8);
-                (key / rms) * weight
+                // Unknown shape, skip norm
+                println!("Warning: Unexpected k_norm shape {:?}", k_norm_shape);
+                normalized
             }
         } else {
             key

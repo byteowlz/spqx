@@ -13,82 +13,11 @@ use crate::config::{Qwen3TTSConfig, TalkerCodePredictorConfig, TalkerConfig};
 use crate::error::{Qwen3TTSError, Result};
 use crate::layers::{KVCache, Linear, RMSNorm, RotaryEmbedding, TransformerLayer};
 use crate::tensor::{DType, Device, Tensor};
-use crate::vocoder::{load_vocoder_weights, Vocoder, VocoderConfig};
+use crate::vocoder::{load_vocoder_weights, Vocoder, VocoderConfig, VocoderStreamingState};
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Instant;
+use tokenizers::pre_tokenizers::byte_level::ByteLevel;
 use tokenizers::Tokenizer;
-
-fn sample_logits(logits: Tensor, temperature: f64, top_k: i64) -> Tensor {
-    sample_logits_with_eos(logits, temperature, top_k, None)
-}
-
-fn debug_generation_enabled() -> bool {
-    std::env::var("QWEN3_TTS_DEBUG_GENERATION")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
-}
-
-fn log_generation_debug(step: i64, logits: &Tensor, eos_token_id: i64, top_k: i64) {
-    let logits_data = logits.to_vec_f32();
-    let eos_index = eos_token_id as usize;
-    if eos_index >= logits_data.len() {
-        println!(
-            "{{\"type\":\"generation_debug\",\"step\":{},\"eosToken\":{},\"error\":\"eos_out_of_range\"}}",
-            step, eos_token_id
-        );
-        return;
-    }
-    let eos_logit = logits_data[eos_index];
-    let eos_rank = 1 + logits_data
-        .iter()
-        .filter(|value| **value > eos_logit)
-        .count();
-    let eos_in_top_k = top_k <= 0 || eos_rank <= top_k as usize;
-    println!(
-        "{{\"type\":\"generation_debug\",\"step\":{},\"eosToken\":{},\"eosLogit\":{:.6},\"eosRank\":{},\"eosInTopK\":{}}}",
-        step, eos_token_id, eos_logit, eos_rank, eos_in_top_k
-    );
-}
-
-fn sample_logits_with_eos(
-    mut logits: Tensor,
-    temperature: f64,
-    top_k: i64,
-    eos_token_id: Option<i64>,
-) -> Tensor {
-    if temperature <= 0.0 {
-        return logits.argmax(-1, true);
-    }
-    if temperature != 1.0 {
-        logits = &logits / temperature;
-    }
-
-    let vocab_size = logits.size()[logits.dim() - 1];
-    let eos_mask = eos_token_id.and_then(|eos| {
-        if eos >= 0 && eos < vocab_size {
-            let token_ids = Tensor::arange(0, vocab_size, logits.device()).view(&[1, vocab_size]);
-            let eos_ids = Tensor::full(&[1, vocab_size], eos as f64, DType::Int64, logits.device());
-            Some(token_ids.eq_tensor(&eos_ids))
-        } else {
-            None
-        }
-    });
-    let eos_logits = logits.shallow_clone();
-
-    if top_k > 0 {
-        let k = top_k.min(vocab_size);
-        let top_values = logits.topk_values(k, -1, true, true);
-        let threshold = top_values.select(-1, k - 1);
-        let mask = logits.lt_tensor(&threshold.unsqueeze(-1));
-        logits = logits.masked_fill(&mask, f64::NEG_INFINITY);
-    }
-
-    if let Some(eos_mask) = eos_mask {
-        logits = Tensor::where_cond(&eos_mask, &eos_logits, &logits);
-    }
-    logits.categorical_sample_logits(1)
-}
 
 /// Code predictor sub-transformer for generating codes 1-15 autoregressively.
 ///
@@ -141,7 +70,7 @@ impl CodePredictor {
         for i in 0..(num_code_groups - 1) {
             let key = format!("talker.code_predictor.model.codec_embedding.{}.weight", i);
             if let Some(tensor) = weights.get(&key) {
-                code_embeddings.push(tensor.to_device(device));
+                code_embeddings.push(tensor.to_device(device).to_dtype(DType::Float32));
             }
         }
         println!(
@@ -175,7 +104,8 @@ impl CodePredictor {
         let norm_weight = weights
             .get("talker.code_predictor.model.norm.weight")
             .ok_or_else(|| Qwen3TTSError::ModelLoad("Missing code_predictor norm.weight".into()))?
-            .to_device(device);
+            .to_device(device)
+            .to_dtype(DType::Float32);
         let norm = RMSNorm::from_weights(norm_weight, rms_norm_eps);
 
         // Load LM heads (15 for codes 1-15)
@@ -233,24 +163,9 @@ impl CodePredictor {
         top_k: i64,
         caches: &mut [KVCache],
     ) -> Vec<i64> {
-        self.generate_code_tensors(main_hidden, code_0_embedding, temperature, top_k, caches)
-            .into_iter()
-            .map(|code| code.int64_value(&[0, 0]))
-            .collect()
-    }
-
-    /// Generate codes 1-15 as MLX tensors without per-code CPU synchronization.
-    pub fn generate_code_tensors(
-        &self,
-        main_hidden: &Tensor,
-        code_0_embedding: &Tensor,
-        temperature: f64,
-        top_k: i64,
-        caches: &mut [KVCache],
-    ) -> Vec<Tensor> {
         let mut codes = Vec::new();
         for cache in caches.iter_mut() {
-            cache.reset();
+            cache.clear();
         }
         let mut input = Tensor::cat(
             &[
@@ -291,10 +206,29 @@ impl CodePredictor {
             let logits = self.lm_heads[step]
                 .forward(&normed.select(1, seq_len - 1).unsqueeze(0))
                 .squeeze_dim(0);
-            let code = sample_logits(logits, temperature, top_k);
-            codes.push(code.shallow_clone());
+            let code = if temperature <= 0.0 {
+                logits.argmax(-1, false).int64_value(&[0])
+            } else {
+                let logits = &logits / temperature;
+                let logits = if top_k > 0 {
+                    let vocab_size = logits.size()[logits.dim() - 1];
+                    let k = top_k.min(vocab_size);
+                    let top_values = logits.topk_values(k, -1, true, true);
+                    let threshold = top_values.select(-1, k - 1);
+                    let mask = logits.lt_tensor(&threshold.unsqueeze(-1));
+                    logits.masked_fill(&mask, f64::NEG_INFINITY)
+                } else {
+                    logits
+                };
+                logits.softmax(-1).multinomial(1, true).int64_value(&[0, 0])
+            };
+
+            codes.push(code);
             if step < self.code_embeddings.len() {
-                input = self.code_embeddings[step].index_select(0, &code);
+                let code_tensor = Tensor::from_slice_i64(&[code]).to_device(self.device);
+                input = self.code_embeddings[step]
+                    .index_select(0, &code_tensor)
+                    .unsqueeze(0);
             }
         }
 
@@ -363,7 +297,8 @@ impl TalkerModel {
         let text_embedding = weights
             .get("talker.model.text_embedding.weight")
             .ok_or_else(|| Qwen3TTSError::ModelLoad("Missing text_embedding.weight".into()))?
-            .to_device(device);
+            .to_device(device)
+            .to_dtype(DType::Float32);
         println!("  Loaded text_embedding: {:?}", text_embedding.size());
 
         // Load text projection layers (2048 -> 1024)
@@ -385,7 +320,8 @@ impl TalkerModel {
             .ok_or_else(|| {
                 Qwen3TTSError::ModelLoad("Missing talker.model.codec_embedding.weight".into())
             })?
-            .to_device(device);
+            .to_device(device)
+            .to_dtype(DType::Float32);
         println!("  Loaded codec_embedding: {:?}", codec_embedding.size());
 
         // Load transformer layers
@@ -414,7 +350,8 @@ impl TalkerModel {
         let norm_weight = weights
             .get("talker.model.norm.weight")
             .ok_or_else(|| Qwen3TTSError::ModelLoad("Missing norm.weight".into()))?
-            .to_device(device);
+            .to_device(device)
+            .to_dtype(DType::Float32);
         let norm = RMSNorm::from_weights(norm_weight, rms_norm_eps);
         println!("  Loaded final norm");
 
@@ -710,9 +647,7 @@ impl TalkerModel {
         ]); // [1, 4, 1024]
 
         // Speaker embedding
-        let spk_embed = speaker_embedding
-            .to_device(self.device)
-            .to_dtype(self.codec_embedding.kind());
+        let spk_embed = speaker_embedding.to_device(self.device);
         let spk_embed = if spk_embed.dim() == 1 {
             spk_embed.unsqueeze(0).unsqueeze(0)
         } else if spk_embed.dim() == 2 {
@@ -766,11 +701,8 @@ impl TalkerModel {
         let num_ref_frames = ref_codes.len();
         let mut ref_codec_embeds = Vec::new();
         for frame_codes in ref_codes {
-            let mut frame_embed = Tensor::zeros(
-                &[1, 1, self.hidden_size],
-                self.codec_embedding.kind(),
-                self.device,
-            );
+            let mut frame_embed =
+                Tensor::zeros(&[1, 1, self.hidden_size], DType::Float32, self.device);
             // Code 0: use main codec_embedding
             if !frame_codes.is_empty() {
                 let code0_ids = Tensor::from_slice_i64(&[frame_codes[0]]).to_device(self.device);
@@ -844,76 +776,61 @@ impl TalkerModel {
         self.norm.forward(&hidden)
     }
 
-    fn code_0_logits(&self, normed_hidden: &Tensor, eos_code: i64, past_codes: &[i64]) -> Tensor {
-        let last_hidden = normed_hidden.select(1, normed_hidden.size()[1] - 1);
-        let mut logits = self.codec_head.forward(&last_hidden);
-        let vocab_size = logits.size()[logits.dim() - 1];
-
-        // Python suppresses special codec tokens [vocab_size - 1024, vocab_size), except EOS.
-        let mut special_mask = vec![false; vocab_size as usize];
-        for token in (vocab_size - 1024).max(0)..vocab_size {
-            if token != eos_code {
-                special_mask[token as usize] = true;
-            }
-        }
-        let special_mask = Tensor::from_slice_bool(&special_mask)
-            .to_device(self.device)
-            .view(&[1, vocab_size]);
-        logits = logits.masked_fill(&special_mask, f64::NEG_INFINITY);
-
-        if !past_codes.is_empty() {
-            let mut penalty_mask = vec![false; vocab_size as usize];
-            for code in past_codes.iter().copied() {
-                if code >= 0 && code < vocab_size {
-                    penalty_mask[code as usize] = true;
-                }
-            }
-            let penalty_mask = Tensor::from_slice_bool(&penalty_mask)
-                .to_device(self.device)
-                .view(&[1, vocab_size]);
-            let zeros = Tensor::zeros(&logits.size(), DType::Float32, self.device);
-            let negative = logits.lt_tensor(&zeros);
-            let neg_penalty = &logits * 1.05;
-            let pos_penalty = &logits / 1.05;
-            let penalized = Tensor::where_cond(&negative, &neg_penalty, &pos_penalty);
-            logits = Tensor::where_cond(&penalty_mask, &penalized, &logits);
-        }
-
-        logits
-    }
-
     /// Predict code 0 from normed hidden states at the last position.
     fn predict_code_0(
         &self,
         normed_hidden: &Tensor,
         temperature: f64,
         top_k: i64,
-        _repetition_penalty: f64,
+        repetition_penalty: f64,
         past_codes: &[i64],
-        eos_code: i64,
     ) -> i64 {
-        self.predict_code_0_tensor(
-            normed_hidden,
-            temperature,
-            top_k,
-            1.05,
-            past_codes,
-            eos_code,
-        )
-        .int64_value(&[0, 0])
-    }
+        let last_hidden = normed_hidden.select(1, normed_hidden.size()[1] - 1);
+        let mut logits = self.codec_head.forward(&last_hidden);
 
-    fn predict_code_0_tensor(
-        &self,
-        normed_hidden: &Tensor,
-        temperature: f64,
-        top_k: i64,
-        _repetition_penalty: f64,
-        past_codes: &[i64],
-        eos_code: i64,
-    ) -> Tensor {
-        let logits = self.code_0_logits(normed_hidden, eos_code, past_codes);
-        sample_logits_with_eos(logits, temperature, top_k, Some(eos_code))
+        // Apply repetition penalty to previously generated codes
+        if repetition_penalty != 1.0 && !past_codes.is_empty() {
+            let logits_data = logits.to_vec_f32();
+            let vocab_size = logits.size()[logits.dim() - 1] as usize;
+            let mut modified = logits_data.clone();
+
+            for &code in past_codes {
+                let idx = code as usize;
+                if idx < vocab_size {
+                    let score = modified[idx];
+                    // Penalize: divide positive logits, multiply negative logits
+                    modified[idx] = if score > 0.0 {
+                        score / repetition_penalty as f32
+                    } else {
+                        score * repetition_penalty as f32
+                    };
+                }
+            }
+
+            logits = Tensor::from_slice_f32(&modified)
+                .reshape(&logits.size())
+                .to_device(self.device);
+        }
+
+        if temperature <= 0.0 {
+            logits.argmax(-1, false).int64_value(&[0])
+        } else {
+            let logits = &logits / temperature;
+
+            let logits = if top_k > 0 {
+                let vocab_size = logits.size()[logits.dim() - 1];
+                let k = top_k.min(vocab_size);
+                let top_values = logits.topk_values(k, -1, true, true);
+                let threshold = top_values.select(-1, k - 1);
+                let mask = logits.lt_tensor(&threshold.unsqueeze(-1));
+                logits.masked_fill(&mask, f64::NEG_INFINITY)
+            } else {
+                logits
+            };
+
+            let probs = logits.softmax(-1);
+            probs.multinomial(1, true).int64_value(&[0, 0])
+        }
     }
 
     /// Generate all codes (code 0 from codec_head, codes 1-15 from code predictor).
@@ -989,7 +906,6 @@ impl TalkerModel {
                 top_k,
                 repetition_penalty,
                 &past_code_0s,
-                eos_code,
             );
             past_code_0s.push(code_0);
 
@@ -1049,108 +965,6 @@ impl TalkerModel {
 
         all_codes
     }
-
-    /// Generate code tensors and call `on_chunk` without per-code CPU synchronization.
-    pub fn generate_code_tensors_streaming<F>(
-        &self,
-        input_embeddings: &Tensor,
-        max_codes: i64,
-        temperature: f64,
-        top_k: i64,
-        eos_code: i64,
-        tts_pad_embed: &Tensor,
-        chunk_size: usize,
-        mut on_chunk: F,
-    ) where
-        F: FnMut(&Tensor, usize) -> bool,
-    {
-        let mut caches = (0..self.layers.len())
-            .map(|_| KVCache::new())
-            .collect::<Vec<_>>();
-        let mut code_predictor_caches = (0..self.code_predictor.layers.len())
-            .map(|_| KVCache::new())
-            .collect::<Vec<_>>();
-        let prefill_len = input_embeddings.size()[1];
-        let mask_zeros = Tensor::zeros(&[prefill_len, prefill_len], DType::Float32, self.device);
-        let upper = Tensor::ones(&[prefill_len, prefill_len], DType::Bool, self.device).triu(1);
-        let causal_mask = mask_zeros.masked_fill(&upper, f64::NEG_INFINITY).view(&[
-            1,
-            1,
-            prefill_len,
-            prefill_len,
-        ]);
-        let mut normed_hidden =
-            self.forward_embeds_with_cache(input_embeddings, Some(&causal_mask), &mut caches);
-        let chunk_size = chunk_size.max(1);
-        let mut pending_codes = Vec::new();
-        let mut past_code_0s = Vec::new();
-        let debug_generation = debug_generation_enabled();
-
-        for step in 0..max_codes {
-            let seq_len = normed_hidden.size()[1];
-            let logits = self.code_0_logits(&normed_hidden, eos_code, &past_code_0s);
-            if debug_generation {
-                log_generation_debug(step, &logits, eos_code, top_k);
-            }
-            let code_0_token = sample_logits_with_eos(logits, temperature, top_k, Some(eos_code));
-
-            let main_hidden = normed_hidden.select(1, seq_len - 1).unsqueeze(1);
-            let code_0_embed = self.codec_embedding.index_select(0, &code_0_token);
-            let predictor_codes = self.code_predictor.generate_code_tensors(
-                &main_hidden,
-                &code_0_embed,
-                temperature,
-                top_k,
-                &mut code_predictor_caches,
-            );
-
-            let mut code_tokens = vec![code_0_token.shallow_clone()];
-            for code in &predictor_codes {
-                code_tokens.push(code.shallow_clone());
-            }
-            let all_codes = Tensor::cat(&code_tokens, 1);
-
-            let mut code_embeds_sum = code_0_embed.shallow_clone();
-            for (i, code) in predictor_codes.iter().enumerate() {
-                if i < self.code_predictor.code_embeddings.len() {
-                    let emb = self.code_predictor.code_embeddings[i].index_select(0, code);
-                    code_embeds_sum = &code_embeds_sum + &emb;
-                }
-            }
-
-            let next_input = &code_embeds_sum + tts_pad_embed;
-            next_input.eval();
-            code_0_token.eval();
-            normed_hidden = self.forward_embeds_with_cache(&next_input, None, &mut caches);
-
-            let code_0 = code_0_token.int64_value(&[0, 0]);
-            if code_0 == eos_code {
-                println!("  EOS detected at step {}", step);
-                break;
-            }
-            past_code_0s.push(code_0);
-
-            pending_codes.push(all_codes);
-            if pending_codes.len() >= chunk_size {
-                let frame_count = pending_codes.len();
-                let chunk = Tensor::stack(&pending_codes, 1);
-                if !on_chunk(&chunk, frame_count) {
-                    break;
-                }
-                pending_codes.clear();
-            }
-
-            if step % 10 == 0 {
-                println!("  Generated {} code frames", step + 1);
-            }
-        }
-
-        if !pending_codes.is_empty() {
-            let frame_count = pending_codes.len();
-            let chunk = Tensor::stack(&pending_codes, 1);
-            on_chunk(&chunk, frame_count);
-        }
-    }
 }
 
 /// TTS Inference engine.
@@ -1190,7 +1004,9 @@ impl TTSInference {
                 )
                 .build()
                 .map_err(|e| Qwen3TTSError::Tokenization(e.to_string()))?;
-                Tokenizer::new(bpe)
+                let mut tokenizer = Tokenizer::new(bpe);
+                tokenizer.with_pre_tokenizer(Some(ByteLevel::new(false, false, true)));
+                tokenizer
             } else {
                 return Err(Qwen3TTSError::Tokenization(
                     "No tokenizer.json or vocab.json found".into(),
@@ -1304,9 +1120,28 @@ impl TTSInference {
         Some(waveform)
     }
 
+    fn decode_codes_to_audio_streaming(
+        &self,
+        codes: &[Vec<i64>],
+        state: &mut VocoderStreamingState,
+    ) -> Option<Vec<f32>> {
+        if codes.is_empty() {
+            return None;
+        }
+
+        let vocoder = self.vocoder.as_ref()?;
+        let codes_tensor = self.codes_to_vocoder_tensor(codes, 2048);
+        println!("Streaming codes tensor shape: {:?}", codes_tensor.size());
+        let audio_tensor = vocoder.decode_streaming(&codes_tensor, state);
+        println!("Streaming vocoder output shape: {:?}", audio_tensor.size());
+        let audio_len = audio_tensor.numel();
+        Some(audio_tensor.view(&[audio_len]).to_vec_f32())
+    }
+
     fn codes_to_vocoder_tensor(&self, codes: &[Vec<i64>], codebook_size: i64) -> Tensor {
         let num_frames = codes.len();
         let num_quantizers = codes[0].len();
+
         let mut codes_flat: Vec<i64> = Vec::with_capacity(num_quantizers * num_frames);
         let mut out_of_range = 0;
         for q in 0..num_quantizers {
@@ -1326,6 +1161,7 @@ impl TTSInference {
                 out_of_range, codebook_size
             );
         }
+
         Tensor::from_slice_i64(&codes_flat)
             .view(&[num_quantizers as i64, num_frames as i64])
             .unsqueeze(0)
@@ -2054,13 +1890,8 @@ impl TTSInference {
         let sample_rate = 24000u32;
         let mut generated = 0usize;
         let mut should_continue = true;
-        let mut vocoder_seconds = 0.0f64;
-        let generation_started = Instant::now();
-        let mut vocoder_state = self
-            .vocoder
-            .as_ref()
-            .map(|vocoder| vocoder.streaming_state());
-        self.talker.generate_code_tensors_streaming(
+        let mut vocoder_state = self.vocoder.as_ref().map(|vocoder| vocoder.streaming_state());
+        self.talker.generate_codes_streaming(
             &input_embeddings,
             max_codes,
             temperature,
@@ -2068,34 +1899,24 @@ impl TTSInference {
             codec_eos_id,
             &tts_pad_embed,
             chunk_size,
-            |codes_tensor, frame_count| {
-                if !should_continue || frame_count == 0 {
+            |code_chunk| {
+                if !should_continue || code_chunk.is_empty() {
                     return should_continue;
                 }
-                generated += frame_count;
-                println!("Streaming decode {} generated code frames", frame_count);
-                if let (Some(vocoder), Some(state)) =
-                    (self.vocoder.as_ref(), vocoder_state.as_mut())
-                {
-                    let vocoder_started = Instant::now();
-                    let codes_for_decoder = codes_tensor.transpose(1, 2);
-                    let audio_tensor = vocoder.decode_streaming(&codes_for_decoder, state);
-                    let audio_len = audio_tensor.numel();
-                    let waveform = audio_tensor.view(&[audio_len]).to_vec_f32();
-                    vocoder_seconds += vocoder_started.elapsed().as_secs_f64();
+                generated += code_chunk.len();
+                println!("Streaming decode {} generated code frames", code_chunk.len());
+                let waveform = if let Some(state) = vocoder_state.as_mut() {
+                    self.decode_codes_to_audio_streaming(code_chunk, state)
+                } else {
+                    self.decode_codes_to_audio(code_chunk)
+                };
+                if let Some(waveform) = waveform {
                     should_continue = on_audio(&waveform, sample_rate);
                 }
                 should_continue
             },
         );
-        let total_seconds = generation_started.elapsed().as_secs_f64();
-        println!(
-            "Generated {} streamed code frames (total={:.3}s, vocoder={:.3}s, codegen={:.3}s)",
-            generated,
-            total_seconds,
-            vocoder_seconds,
-            total_seconds - vocoder_seconds
-        );
+        println!("Generated {} streamed code frames", generated);
         Ok(())
     }
 }

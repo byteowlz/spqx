@@ -27,14 +27,6 @@ const DEFAULT_MODEL_PATH: &str = "/tmp/qwen3-tts.cpp/models/Qwen3-TTS-12Hz-0.6B-
 const DEFAULT_REF_TEXT: &str = "I'm confused why some people have super short timelines, yet at the same time are bullish on scaling up reinforcement learning atop LLMs. If we're actually close to a human-like learner, then this whole approach of training on verifiable outcomes.";
 const DEFAULT_MAX_NEW_TOKENS: i64 = 1536;
 const DEFAULT_BLOCKSIZE: usize = 512;
-const MLX_STREAMING_TOKENS_PER_SECOND: f64 = 12.5;
-const MIN_UTTERANCE_TOKENS: i64 = 360;
-const ESTIMATED_WORDS_PER_SECOND: f64 = 2.6;
-const ESTIMATED_CHARS_PER_SECOND: f64 = 14.0;
-const TOKEN_SAFETY_MARGIN: f64 = 1.35;
-const BASE_PROMPT_SECONDS: f64 = 1.0;
-const PUNCTUATION_PAUSE_SECONDS: f64 = 0.5;
-const MAX_TRAILING_SILENCE_SECONDS: f64 = 1.5;
 const FRAME_HEADER_BYTES: usize = 9;
 const STDOUT_FILENO: i32 = 1;
 const STDERR_FILENO: i32 = 2;
@@ -272,7 +264,7 @@ impl Worker {
             max_new_tokens: args.max_new_tokens,
             output_sample_rate: args.output_sample_rate,
             blocksize: args.blocksize.max(1),
-            streaming_chunk_size: args.streaming_chunk_size.unwrap_or(8).max(1) as usize,
+            streaming_chunk_size: args.streaming_chunk_size.unwrap_or(4).max(1) as usize,
         })
     }
 
@@ -317,16 +309,13 @@ impl Worker {
             &self.output_sample_rate.to_le_bytes(),
         )?;
 
-        let effective_max_new_tokens =
-            estimate_max_new_tokens(text, self.streaming_chunk_size, self.max_new_tokens);
-
         log_json(json!({
             "type": "ready",
             "backend": "rust_mlx",
             "model": self.model_name,
             "modelType": "base",
             "chunkSize": self.streaming_chunk_size,
-            "maxNewTokens": effective_max_new_tokens,
+            "maxNewTokens": self.max_new_tokens,
             "temperature": self.temperature,
             "topK": self.top_k,
             "topP": 1.0,
@@ -348,7 +337,7 @@ impl Worker {
             &self.language,
             self.temperature,
             self.top_k,
-            effective_max_new_tokens,
+            self.max_new_tokens,
             self.streaming_chunk_size,
             |samples, sample_rate| {
                 if take_cancelled(cancelled, request_id) {
@@ -363,17 +352,11 @@ impl Worker {
                     }));
                     ttfa_logged = true;
                 }
-                match streamer.push(samples, sample_rate, request_id, writer) {
-                    Ok(true) => true,
-                    Ok(false) => {
-                        log_json(json!({ "type": "trailing_silence_stop", "id": request_id }));
-                        false
-                    }
-                    Err(error) => {
-                        stream_error = Some(error);
-                        false
-                    }
+                if let Err(error) = streamer.push(samples, sample_rate, request_id, writer) {
+                    stream_error = Some(error);
+                    return false;
                 }
+                true
             },
         )?;
         if let Some(error) = stream_error {
@@ -409,8 +392,6 @@ struct PcmStreamer {
     found_speech: bool,
     leftover: Vec<i16>,
     audio_samples: usize,
-    silent_samples_after_speech: usize,
-    max_trailing_silence_samples: usize,
 }
 
 impl PcmStreamer {
@@ -421,9 +402,6 @@ impl PcmStreamer {
             found_speech: false,
             leftover: Vec::new(),
             audio_samples: 0,
-            silent_samples_after_speech: 0,
-            max_trailing_silence_samples: (output_sample_rate as f64 * MAX_TRAILING_SILENCE_SECONDS)
-                as usize,
         }
     }
 
@@ -433,7 +411,7 @@ impl PcmStreamer {
         sample_rate: u32,
         request_id: u32,
         writer: &mut BinaryWriter,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<()> {
         let samples = if sample_rate == self.output_sample_rate {
             samples.to_vec()
         } else {
@@ -448,7 +426,7 @@ impl PcmStreamer {
                 pcm.drain(0..start);
                 self.found_speech = true;
             } else {
-                return Ok(true);
+                return Ok(());
             }
         }
 
@@ -460,22 +438,12 @@ impl PcmStreamer {
         }
 
         let complete = (pcm.len() / self.blocksize) * self.blocksize;
-        let silence_threshold = (32768.0 * 0.003) as i16;
         for chunk in pcm[..complete].chunks(self.blocksize) {
-            if chunk.iter().all(|sample| sample.abs() <= silence_threshold) {
-                self.silent_samples_after_speech += chunk.len();
-                if self.silent_samples_after_speech >= self.max_trailing_silence_samples {
-                    self.leftover.clear();
-                    return Ok(false);
-                }
-            } else {
-                self.silent_samples_after_speech = 0;
-            }
             self.audio_samples += chunk.len();
             writer.write_frame(WORKER_OUTPUT_AUDIO_CHUNK, request_id, &i16_bytes(chunk))?;
         }
         self.leftover = pcm[complete..].to_vec();
-        Ok(true)
+        Ok(())
     }
 
     fn finish(&mut self, request_id: u32, writer: &mut BinaryWriter) -> anyhow::Result<()> {
@@ -678,41 +646,6 @@ fn load_text(
 fn path_str(path: &Path) -> anyhow::Result<&str> {
     path.to_str()
         .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {}", path.display()))
-}
-
-fn estimate_max_new_tokens(text: &str, streaming_chunk_size: usize, configured_cap: i64) -> i64 {
-    let text = text.trim();
-    let chunk_size = streaming_chunk_size.max(1) as i64;
-    let cap = configured_cap.max(1);
-    if text.is_empty() {
-        return cap.min(MIN_UTTERANCE_TOKENS);
-    }
-
-    let word_count = text
-        .split_whitespace()
-        .filter(|word| word.chars().any(char::is_alphanumeric))
-        .count() as f64;
-    let char_count = text.chars().filter(|ch| !ch.is_whitespace()).count() as f64;
-    let punctuation_count = text.chars().filter(|ch| ch.is_ascii_punctuation()).count() as f64;
-    let word_seconds = if word_count > 0.0 {
-        word_count / ESTIMATED_WORDS_PER_SECOND
-    } else {
-        0.0
-    };
-    let char_seconds = if char_count > 0.0 {
-        char_count / ESTIMATED_CHARS_PER_SECOND
-    } else {
-        0.0
-    };
-    let estimated_seconds = word_seconds.max(char_seconds)
-        + punctuation_count * PUNCTUATION_PAUSE_SECONDS
-        + BASE_PROMPT_SECONDS;
-    let estimated_tokens =
-        (estimated_seconds * MLX_STREAMING_TOKENS_PER_SECOND * TOKEN_SAFETY_MARGIN).ceil() as i64;
-    let aligned_tokens =
-        chunk_size.max(((estimated_tokens + chunk_size - 1) / chunk_size) * chunk_size);
-    let requested_tokens = MIN_UTTERANCE_TOKENS.max(aligned_tokens);
-    cap.min(requested_tokens)
 }
 
 fn samples_to_i16(samples: &[f32]) -> Vec<i16> {

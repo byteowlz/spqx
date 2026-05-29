@@ -99,16 +99,6 @@ pub struct mlx_optional_float {
     pub has_value: bool,
 }
 
-/// Optional dtype value (matches mlx_optional_dtype_ struct).
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct mlx_optional_dtype {
-    /// The dtype value.
-    pub value: mlx_dtype,
-    /// Whether the value is present.
-    pub has_value: bool,
-}
-
 extern "C" {
     // -----------------------------------------------------------------------
     // Array lifecycle
@@ -218,18 +208,6 @@ extern "C" {
 
     // Matrix multiplication
     pub fn mlx_matmul(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) -> c_int;
-
-    pub fn mlx_dequantize(
-        res: *mut mlx_array,
-        w: mlx_array,
-        scales: mlx_array,
-        biases: mlx_array,
-        group_size: mlx_optional_int,
-        bits: mlx_optional_int,
-        mode: *const c_char,
-        dtype: mlx_optional_dtype,
-        s: mlx_stream,
-    ) -> c_int;
 
     pub fn mlx_quantized_matmul(
         res: *mut mlx_array,
@@ -498,10 +476,7 @@ extern "C" {
     pub fn mlx_less(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) -> c_int;
     pub fn mlx_greater(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) -> c_int;
     pub fn mlx_equal(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) -> c_int;
-    pub fn mlx_not_equal(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) -> c_int;
     pub fn mlx_logical_or(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) -> c_int;
-    pub fn mlx_logical_and(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream)
-        -> c_int;
     pub fn mlx_logical_not(res: *mut mlx_array, a: mlx_array, s: mlx_stream) -> c_int;
 
     // Triangular
