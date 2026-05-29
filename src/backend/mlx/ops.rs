@@ -83,6 +83,45 @@ pub fn matmul(a: &MlxArray, b: &MlxArray) -> MlxArray {
     res
 }
 
+pub fn dequantize(
+    weight: &MlxArray,
+    scales: &MlxArray,
+    biases: Option<&MlxArray>,
+    group_size: i32,
+    bits: i32,
+    mode: &str,
+    dtype: crate::backend::mlx::ffi::mlx_dtype,
+) -> MlxArray {
+    let mut res = MlxArray::empty();
+    let mode = CString::new(mode).expect("quantization mode contains NUL");
+    let group_size = ffi::mlx_optional_int {
+        value: group_size,
+        has_value: true,
+    };
+    let bits = ffi::mlx_optional_int {
+        value: bits,
+        has_value: true,
+    };
+    let dtype = ffi::mlx_optional_dtype {
+        value: dtype,
+        has_value: true,
+    };
+    unsafe {
+        ffi::mlx_dequantize(
+            &mut res.ptr,
+            weight.ptr,
+            scales.ptr,
+            biases.map_or(std::ptr::null_mut(), |biases| biases.ptr),
+            group_size,
+            bits,
+            mode.as_ptr(),
+            dtype,
+            default_stream(),
+        );
+    }
+    res
+}
+
 pub fn quantized_matmul(
     x: &MlxArray,
     weight: &MlxArray,
@@ -484,9 +523,21 @@ pub fn equal(a: &MlxArray, b: &MlxArray) -> MlxArray {
     res
 }
 
+pub fn not_equal(a: &MlxArray, b: &MlxArray) -> MlxArray {
+    let mut res = MlxArray::empty();
+    unsafe { ffi::mlx_not_equal(&mut res.ptr, a.ptr, b.ptr, default_stream()) };
+    res
+}
+
 pub fn logical_or(a: &MlxArray, b: &MlxArray) -> MlxArray {
     let mut res = MlxArray::empty();
     unsafe { ffi::mlx_logical_or(&mut res.ptr, a.ptr, b.ptr, default_stream()) };
+    res
+}
+
+pub fn logical_and(a: &MlxArray, b: &MlxArray) -> MlxArray {
+    let mut res = MlxArray::empty();
+    unsafe { ffi::mlx_logical_and(&mut res.ptr, a.ptr, b.ptr, default_stream()) };
     res
 }
 

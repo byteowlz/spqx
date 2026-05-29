@@ -206,6 +206,10 @@ impl Tensor {
         Tensor::from_tch(tch::Tensor::from_slice(data))
     }
 
+    pub fn from_slice_bool(data: &[bool]) -> Self {
+        Tensor::from_tch(tch::Tensor::from_slice(data))
+    }
+
     pub fn zeros(shape: &[i64], dtype: DType, device: Device) -> Self {
         let opts = (tch::Kind::from(dtype), tch::Device::from(device));
         Tensor::from_tch(tch::Tensor::zeros(shape, opts))
@@ -468,6 +472,14 @@ impl Tensor {
         Tensor::from_tch(self.inner.multinomial(num_samples, replacement))
     }
 
+    pub fn categorical_sample_logits(&self, num_samples: i64) -> Self {
+        Tensor::from_tch(
+            self.inner
+                .softmax(-1, tch::Kind::Float)
+                .multinomial(num_samples, true),
+        )
+    }
+
     pub fn masked_fill(&self, mask: &Tensor, value: f64) -> Self {
         Tensor::from_tch(self.inner.masked_fill(&mask.inner, value))
     }
@@ -486,8 +498,32 @@ impl Tensor {
         Tensor::from_tch(self.inner.lt_tensor(&other.inner))
     }
 
+    pub fn gt_tensor(&self, other: &Tensor) -> Self {
+        Tensor::from_tch(self.inner.gt_tensor(&other.inner))
+    }
+
+    pub fn eq_tensor(&self, other: &Tensor) -> Self {
+        Tensor::from_tch(self.inner.eq_tensor(&other.inner))
+    }
+
+    pub fn ne_tensor(&self, other: &Tensor) -> Self {
+        Tensor::from_tch(self.inner.ne_tensor(&other.inner))
+    }
+
+    pub fn where_cond(condition: &Tensor, x: &Tensor, y: &Tensor) -> Self {
+        Tensor::from_tch(condition.inner.where_self(&x.inner, &y.inner))
+    }
+
     pub fn logical_or(&self, other: &Tensor) -> Self {
         Tensor::from_tch(self.inner.logical_or(&other.inner))
+    }
+
+    pub fn logical_and(&self, other: &Tensor) -> Self {
+        Tensor::from_tch(self.inner.logical_and(&other.inner))
+    }
+
+    pub fn logical_not(&self) -> Self {
+        Tensor::from_tch(self.inner.logical_not())
     }
 
     // -- Signal processing --
@@ -606,6 +642,8 @@ impl Tensor {
         Device::from(self.inner.device())
     }
 
+    pub fn eval(&self) {}
+
     pub fn shallow_clone(&self) -> Self {
         Tensor::from_tch(self.inner.shallow_clone())
     }
@@ -664,6 +702,13 @@ impl Tensor {
     pub fn from_slice_i32(data: &[i32]) -> Self {
         let shape = [data.len() as i32];
         Tensor::from_mlx(crate::backend::mlx::array::MlxArray::from_i32(data, &shape))
+    }
+
+    pub fn from_slice_bool(data: &[bool]) -> Self {
+        let shape = [data.len() as i32];
+        Tensor::from_mlx(crate::backend::mlx::array::MlxArray::from_bool(
+            data, &shape,
+        ))
     }
 
     pub fn zeros(shape: &[i64], dtype: DType, _device: Device) -> Self {
@@ -1083,22 +1128,23 @@ impl Tensor {
     }
 
     pub fn multinomial(&self, num_samples: i64, _replacement: bool) -> Self {
-        // MLX uses mlx_random_categorical which takes log-probabilities.
-        // Convert probabilities to log-probs first.
         let log_probs = crate::backend::mlx::ops::log(&self.inner);
-        let result = crate::backend::mlx::ops::random_categorical(
-            &log_probs,
-            -1, // last axis
-            num_samples as i32,
-        );
-        // random_categorical returns shape [...] (last dim removed).
-        // PyTorch multinomial returns [..., num_samples]. Add the dim back.
+        let result =
+            crate::backend::mlx::ops::random_categorical(&log_probs, -1, num_samples as i32);
+        let result = crate::backend::mlx::ops::expand_dims(&result, &[-1]);
+        Tensor::from_mlx(result)
+    }
+
+    pub fn categorical_sample_logits(&self, num_samples: i64) -> Self {
+        let result =
+            crate::backend::mlx::ops::random_categorical(&self.inner, -1, num_samples as i32);
         let result = crate::backend::mlx::ops::expand_dims(&result, &[-1]);
         Tensor::from_mlx(result)
     }
 
     pub fn masked_fill(&self, mask: &Tensor, value: f64) -> Self {
-        let val = crate::backend::mlx::array::MlxArray::scalar_f32(value as f32);
+        let scalar = crate::backend::mlx::array::MlxArray::scalar_f32(value as f32);
+        let val = crate::backend::mlx::array::MlxArray::full(&[], &scalar, self.inner.dtype());
         // where(mask, val, self) — fill with val where mask is true
         Tensor::from_mlx(crate::backend::mlx::ops::where_cond(
             &mask.inner,
@@ -1121,11 +1167,45 @@ impl Tensor {
         Tensor::from_mlx(crate::backend::mlx::ops::less(&self.inner, &other.inner))
     }
 
+    pub fn gt_tensor(&self, other: &Tensor) -> Self {
+        Tensor::from_mlx(crate::backend::mlx::ops::greater(&self.inner, &other.inner))
+    }
+
+    pub fn eq_tensor(&self, other: &Tensor) -> Self {
+        Tensor::from_mlx(crate::backend::mlx::ops::equal(&self.inner, &other.inner))
+    }
+
+    pub fn ne_tensor(&self, other: &Tensor) -> Self {
+        Tensor::from_mlx(crate::backend::mlx::ops::not_equal(
+            &self.inner,
+            &other.inner,
+        ))
+    }
+
+    pub fn where_cond(condition: &Tensor, x: &Tensor, y: &Tensor) -> Self {
+        Tensor::from_mlx(crate::backend::mlx::ops::where_cond(
+            &condition.inner,
+            &x.inner,
+            &y.inner,
+        ))
+    }
+
     pub fn logical_or(&self, other: &Tensor) -> Self {
         Tensor::from_mlx(crate::backend::mlx::ops::logical_or(
             &self.inner,
             &other.inner,
         ))
+    }
+
+    pub fn logical_and(&self, other: &Tensor) -> Self {
+        Tensor::from_mlx(crate::backend::mlx::ops::logical_and(
+            &self.inner,
+            &other.inner,
+        ))
+    }
+
+    pub fn logical_not(&self) -> Self {
+        Tensor::from_mlx(crate::backend::mlx::ops::logical_not(&self.inner))
     }
 
     // -- Signal processing --
@@ -1292,6 +1372,10 @@ impl Tensor {
     pub fn device(&self) -> Device {
         // MLX arrays don't track device; computation device is global.
         Device::Gpu(0)
+    }
+
+    pub fn eval(&self) {
+        self.inner.eval();
     }
 
     pub fn shallow_clone(&self) -> Self {

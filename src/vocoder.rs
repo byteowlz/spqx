@@ -6,7 +6,10 @@
 //! This module implements the speech tokenizer decoder that converts
 //! discrete audio codes back to waveforms.
 
+#[cfg(feature = "mlx")]
+use crate::backend::mlx;
 use crate::error::{Qwen3TTSError, Result};
+use crate::layers::KVCache;
 use crate::tensor::{DType, Device, Tensor};
 use std::collections::HashMap;
 
@@ -358,6 +361,12 @@ pub struct CausalConv1d {
     groups: i64,
 }
 
+/// Streaming state for a causal 1D convolution.
+#[derive(Default)]
+pub struct CausalConv1dState {
+    buffer: Option<Tensor>,
+}
+
 impl CausalConv1d {
     /// Create from weights.
     pub fn from_weights(
@@ -376,10 +385,9 @@ impl CausalConv1d {
         }
     }
 
-    /// Forward pass with causal padding.
-    pub fn forward(&self, x: &Tensor) -> Tensor {
+    fn padding(&self, input_channels: i64) -> i64 {
         let weight_shape = self.weight.size();
-        let input_channels_per_group = x.size()[1] / self.groups;
+        let input_channels_per_group = input_channels / self.groups;
         let kernel_size = if weight_shape.len() == 3 && weight_shape[2] == input_channels_per_group
         {
             weight_shape[1]
@@ -387,11 +395,11 @@ impl CausalConv1d {
             weight_shape[2]
         };
         let effective_kernel_size = (kernel_size - 1) * self.dilation + 1;
-        let padding = effective_kernel_size - self.stride;
-        // Apply causal padding (left-side only)
-        let padded = x.constant_pad_nd(&[padding, 0]);
+        effective_kernel_size - self.stride
+    }
 
-        padded.conv1d(
+    fn conv(&self, x: &Tensor) -> Tensor {
+        x.conv1d(
             &self.weight,
             self.bias.as_ref(),
             &[self.stride],
@@ -399,6 +407,36 @@ impl CausalConv1d {
             &[self.dilation],
             self.groups,
         )
+    }
+
+    /// Forward pass with causal padding.
+    pub fn forward(&self, x: &Tensor) -> Tensor {
+        let padding = self.padding(x.size()[1]);
+        let padded = if padding > 0 {
+            x.constant_pad_nd(&[padding, 0])
+        } else {
+            x.shallow_clone()
+        };
+        self.conv(&padded)
+    }
+
+    /// Incremental forward pass matching MLX `CausalConv1d.step`.
+    pub fn step(&self, x: &Tensor, state: &mut CausalConv1dState) -> Tensor {
+        let padding = self.padding(x.size()[1]);
+        let padded = if padding > 0 {
+            if let Some(buffer) = &state.buffer {
+                Tensor::cat(&[buffer.shallow_clone(), x.shallow_clone()], 2)
+            } else {
+                x.constant_pad_nd(&[padding, 0])
+            }
+        } else {
+            x.shallow_clone()
+        };
+        if padding > 0 {
+            let length = padded.size()[2];
+            state.buffer = Some(padded.narrow(2, length - padding, padding));
+        }
+        self.conv(&padded)
     }
 }
 
@@ -412,6 +450,12 @@ pub struct CausalTransConv1d {
     stride: i64,
     /// Right padding to trim (causal: no left trim)
     right_pad: i64,
+}
+
+/// Streaming overlap state for a causal transposed 1D convolution.
+#[derive(Default)]
+pub struct CausalTransConv1dState {
+    overflow: Option<Tensor>,
 }
 
 impl CausalTransConv1d {
@@ -428,9 +472,8 @@ impl CausalTransConv1d {
         }
     }
 
-    /// Forward pass with upsampling.
-    pub fn forward(&self, x: &Tensor) -> Tensor {
-        let out = x.conv_transpose1d(
+    fn raw_forward(&self, x: &Tensor) -> Tensor {
+        x.conv_transpose1d(
             &self.weight,
             self.bias.as_ref(),
             &[self.stride],
@@ -438,9 +481,42 @@ impl CausalTransConv1d {
             &[0],
             1,
             &[1],
-        );
+        )
+    }
 
-        // Trim right padding (causal: no left trim)
+    /// Forward pass with upsampling.
+    pub fn forward(&self, x: &Tensor) -> Tensor {
+        let out = self.raw_forward(x);
+        self.trim_right(out)
+    }
+
+    /// Incremental overlap-add step matching MLX `DecoderBlockUpsample.step`.
+    pub fn step(&self, x: &Tensor, state: &mut CausalTransConv1dState) -> Tensor {
+        let mut out = self.raw_forward(x);
+        if let Some(overflow) = &state.overflow {
+            let overflow_len = overflow.size()[2];
+            let length = out.size()[2];
+            if length > overflow_len {
+                let merged = out.narrow(2, 0, overflow_len) + overflow;
+                let rest = out.narrow(2, overflow_len, length - overflow_len);
+                out = Tensor::cat(&[merged, rest], 2);
+            } else {
+                out += overflow.narrow(2, 0, length);
+            }
+        }
+        if self.right_pad > 0 {
+            let length = out.size()[2];
+            if length > self.right_pad {
+                state.overflow = Some(out.narrow(2, length - self.right_pad, self.right_pad));
+                return out.narrow(2, 0, length - self.right_pad);
+            }
+            state.overflow = Some(out.shallow_clone());
+            return Tensor::zeros(&[out.size()[0], out.size()[1], 0], out.kind(), out.device());
+        }
+        out
+    }
+
+    fn trim_right(&self, out: Tensor) -> Tensor {
         let length = out.size()[2];
         if self.right_pad > 0 && length > self.right_pad {
             out.narrow(2, 0, length - self.right_pad)
@@ -497,7 +573,17 @@ impl VocoderRotaryEmbedding {
 
     /// Compute cos and sin for given sequence length.
     pub fn forward(&self, seq_len: i64, device: Device) -> (Tensor, Tensor) {
-        let positions: Vec<f32> = (0..seq_len).map(|i| i as f32).collect();
+        self.forward_with_offset(seq_len, 0, device)
+    }
+
+    /// Compute cos and sin for cached incremental decoding positions.
+    pub fn forward_with_offset(
+        &self,
+        seq_len: i64,
+        offset: i64,
+        device: Device,
+    ) -> (Tensor, Tensor) {
+        let positions: Vec<f32> = (offset..offset + seq_len).map(|i| i as f32).collect();
         let positions = Tensor::from_slice_f32(&positions)
             .to_device(device)
             .unsqueeze(1);
@@ -581,6 +667,7 @@ pub struct VocoderAttention {
     num_heads: i64,
     head_dim: i64,
     scaling: f64,
+    #[allow(dead_code)]
     sliding_window: i64,
 }
 
@@ -609,17 +696,33 @@ impl VocoderAttention {
     }
 
     /// Forward pass.
-    pub fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
+    pub fn forward(
+        &self,
+        hidden_states: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        attention_mask: Option<&Tensor>,
+    ) -> Tensor {
+        self.forward_with_cache(hidden_states, cos, sin, attention_mask, None)
+    }
+
+    /// Forward pass with optional KV cache, matching MLX decoder attention.
+    pub fn forward_with_cache(
+        &self,
+        hidden_states: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        attention_mask: Option<&Tensor>,
+        cache: Option<&mut KVCache>,
+    ) -> Tensor {
         let s = hidden_states.size();
         let batch = s[0];
         let seq_len = s[1];
 
-        // Project to q, k, v
         let q = hidden_states.matmul(&self.q_proj.transpose(0, 1));
         let k = hidden_states.matmul(&self.k_proj.transpose(0, 1));
         let v = hidden_states.matmul(&self.v_proj.transpose(0, 1));
 
-        // Reshape to [batch, num_heads, seq_len, head_dim]
         let q = q
             .view(&[batch, seq_len, self.num_heads, self.head_dim])
             .transpose(1, 2);
@@ -630,35 +733,32 @@ impl VocoderAttention {
             .view(&[batch, seq_len, self.num_heads, self.head_dim])
             .transpose(1, 2);
 
-        // Apply rotary embeddings
         let (q, k) = apply_rotary_pos_emb(&q, &k, cos, sin);
-
-        // Scaled dot-product attention
-        let attn_weights = q.matmul(&k.transpose(-2, -1)) * self.scaling;
-
-        // Create causal mask with sliding window using masked_fill to avoid NaN
-        let invalid =
-            Tensor::ones(&[seq_len, seq_len], DType::Bool, hidden_states.device()).triu(1);
-
-        // Apply sliding window: also mask positions more than sliding_window steps back
-        let invalid = if self.sliding_window > 0 && self.sliding_window < seq_len {
-            let too_far = Tensor::ones(&[seq_len, seq_len], DType::Bool, hidden_states.device())
-                .tril(-(self.sliding_window));
-            invalid.logical_or(&too_far)
+        let (k, v) = if let Some(cache) = cache {
+            cache.update_and_fetch(k, v)
         } else {
-            invalid
+            (k, v)
         };
 
-        // Apply mask: set invalid positions to -inf
-        let attn_mask = Tensor::zeros(&[seq_len, seq_len], DType::Float32, hidden_states.device());
-        let attn_mask = attn_mask.masked_fill(&invalid, f64::NEG_INFINITY);
-        let attn_weights = attn_weights + attn_mask.unsqueeze(0).unsqueeze(0);
+        #[cfg(feature = "mlx")]
+        let attn_output = Tensor::from_mlx(mlx::ops::fast_scaled_dot_product_attention(
+            q.as_mlx(),
+            k.as_mlx(),
+            v.as_mlx(),
+            self.scaling as f32,
+            attention_mask.map(|mask| mask.as_mlx()),
+        ));
+        #[cfg(not(feature = "mlx"))]
+        let attn_output = {
+            let attn_weights = q.matmul(&k.transpose(-2, -1)) * self.scaling;
+            let attn_weights = if let Some(mask) = attention_mask {
+                attn_weights + mask
+            } else {
+                attn_weights
+            };
+            attn_weights.softmax(-1).matmul(&v)
+        };
 
-        // Softmax and apply to values
-        let attn_weights = attn_weights.softmax(-1);
-        let attn_output = attn_weights.matmul(&v);
-
-        // Reshape back and project output
         let attn_output = attn_output
             .transpose(1, 2)
             .contiguous()
@@ -747,15 +847,33 @@ impl VocoderTransformerLayer {
     }
 
     /// Forward pass.
-    pub fn forward(&self, hidden_states: &Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
+    pub fn forward(
+        &self,
+        hidden_states: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        attention_mask: Option<&Tensor>,
+    ) -> Tensor {
+        self.forward_with_cache(hidden_states, cos, sin, attention_mask, None)
+    }
+
+    /// Forward pass with optional KV cache.
+    pub fn forward_with_cache(
+        &self,
+        hidden_states: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        attention_mask: Option<&Tensor>,
+        cache: Option<&mut KVCache>,
+    ) -> Tensor {
         let residual = hidden_states;
 
-        // Self attention
         let hidden_states = self.input_layernorm.forward(hidden_states);
-        let hidden_states = self.self_attn.forward(&hidden_states, cos, sin);
+        let hidden_states =
+            self.self_attn
+                .forward_with_cache(&hidden_states, cos, sin, attention_mask, cache);
         let hidden_states = residual + self.self_attn_layer_scale.forward(&hidden_states);
 
-        // MLP
         let residual = &hidden_states;
         let mlp_out = self.post_attention_layernorm.forward(&hidden_states);
         let mlp_out = self.mlp.forward(&mlp_out);
@@ -772,6 +890,19 @@ pub struct VocoderTransformer {
     output_proj_weight: Tensor,
     output_proj_bias: Tensor,
     rotary_emb: VocoderRotaryEmbedding,
+}
+
+/// Streaming KV-cache state for the vocoder pre-transformer.
+pub struct VocoderTransformerState {
+    caches: Vec<KVCache>,
+}
+
+impl VocoderTransformerState {
+    fn new(num_layers: usize) -> Self {
+        Self {
+            caches: (0..num_layers).map(|_| KVCache::new()).collect(),
+        }
+    }
 }
 
 impl VocoderTransformer {
@@ -850,32 +981,72 @@ impl VocoderTransformer {
 
     /// Forward pass.
     pub fn forward(&self, hidden: &Tensor) -> Tensor {
-        // hidden: [batch, latent_dim, seq_len] -> transpose to [batch, seq_len, latent_dim]
-        let hidden = hidden.transpose(1, 2);
+        self.forward_inner(hidden, None)
+    }
 
-        // Project to transformer hidden size
+    /// Incremental forward pass using a KV cache.
+    pub fn step(&self, hidden: &Tensor, state: &mut VocoderTransformerState) -> Tensor {
+        self.forward_inner(hidden, Some(state))
+    }
+
+    fn forward_inner(
+        &self,
+        hidden: &Tensor,
+        mut state: Option<&mut VocoderTransformerState>,
+    ) -> Tensor {
+        let hidden = hidden.transpose(1, 2);
         let mut hidden =
             hidden.matmul(&self.input_proj_weight.transpose(0, 1)) + &self.input_proj_bias;
 
-        // Get sequence length and compute rotary embeddings
         let seq_len = hidden.size()[1];
-        let (cos, sin) = self.rotary_emb.forward(seq_len, hidden.device());
+        let offset = state
+            .as_ref()
+            .and_then(|state| state.caches.first())
+            .map(|cache| cache.len())
+            .unwrap_or(0);
+        let (cos, sin) = self
+            .rotary_emb
+            .forward_with_offset(seq_len, offset, hidden.device());
+        let attention_mask = if seq_len > 1 {
+            Some(causal_mask(
+                seq_len,
+                offset + seq_len,
+                offset,
+                hidden.device(),
+            ))
+        } else {
+            None
+        };
 
-        // Run through transformer layers
-        for layer in &self.layers {
-            hidden = layer.forward(&hidden, &cos, &sin);
+        if let Some(state) = state.as_deref_mut() {
+            for (layer, cache) in self.layers.iter().zip(state.caches.iter_mut()) {
+                hidden = layer.forward_with_cache(
+                    &hidden,
+                    &cos,
+                    &sin,
+                    attention_mask.as_ref(),
+                    Some(cache),
+                );
+            }
+        } else {
+            for layer in &self.layers {
+                hidden = layer.forward(&hidden, &cos, &sin, attention_mask.as_ref());
+            }
         }
 
-        // Final norm
         hidden = self.norm.forward(&hidden);
-
-        // Project back to latent dimension
         let hidden =
             hidden.matmul(&self.output_proj_weight.transpose(0, 1)) + &self.output_proj_bias;
-
-        // Transpose back: [batch, seq_len, latent_dim] -> [batch, latent_dim, seq_len]
         hidden.transpose(1, 2)
     }
+}
+
+fn causal_mask(seq_len: i64, total_len: i64, offset: i64, device: Device) -> Tensor {
+    let invalid = Tensor::ones(&[seq_len, total_len], DType::Bool, device).triu(offset + 1);
+    Tensor::zeros(&[seq_len, total_len], DType::Float32, device)
+        .masked_fill(&invalid, f64::NEG_INFINITY)
+        .unsqueeze(0)
+        .unsqueeze(0)
 }
 
 // =============================================================================
@@ -925,6 +1096,12 @@ pub struct ConvNeXtBlock {
     gamma: Tensor,
     /// Dimension
     dim: i64,
+}
+
+/// Streaming state for a ConvNeXt block.
+#[derive(Default)]
+pub struct ConvNeXtBlockState {
+    dwconv: CausalConv1dState,
 }
 
 impl ConvNeXtBlock {
@@ -981,8 +1158,21 @@ impl ConvNeXtBlock {
 
     /// Forward pass.
     pub fn forward(&self, x: &Tensor) -> Tensor {
+        self.forward_inner(x, None)
+    }
+
+    /// Incremental forward pass matching MLX `ConvNeXtBlock.step`.
+    pub fn step(&self, x: &Tensor, state: &mut ConvNeXtBlockState) -> Tensor {
+        self.forward_inner(x, Some(&mut state.dwconv))
+    }
+
+    fn forward_inner(&self, x: &Tensor, conv_state: Option<&mut CausalConv1dState>) -> Tensor {
         let residual = x;
-        let hidden = self.dwconv.forward(x);
+        let hidden = if let Some(conv_state) = conv_state {
+            self.dwconv.step(x, conv_state)
+        } else {
+            self.dwconv.forward(x)
+        };
         let hidden = hidden.transpose(1, 2);
         let hidden = hidden.layer_norm(
             &[self.dim],
@@ -1005,6 +1195,13 @@ pub struct DecoderResidualUnit {
     conv1: CausalConv1d,
     act2: SnakeBeta,
     conv2: CausalConv1d,
+}
+
+/// Streaming state for a decoder residual unit.
+#[derive(Default)]
+pub struct DecoderResidualUnitState {
+    conv1: CausalConv1dState,
+    conv2: CausalConv1dState,
 }
 
 impl DecoderResidualUnit {
@@ -1057,11 +1254,26 @@ impl DecoderResidualUnit {
 
     /// Forward pass.
     pub fn forward(&self, x: &Tensor) -> Tensor {
+        self.forward_inner(x, None)
+    }
+
+    /// Incremental forward pass matching MLX `DecoderResidualUnit.step`.
+    pub fn step(&self, x: &Tensor, state: &mut DecoderResidualUnitState) -> Tensor {
+        self.forward_inner(x, Some(state))
+    }
+
+    fn forward_inner(&self, x: &Tensor, state: Option<&mut DecoderResidualUnitState>) -> Tensor {
         let residual = x;
         let hidden = self.act1.forward(x);
-        let hidden = self.conv1.forward(&hidden);
-        let hidden = self.act2.forward(&hidden);
-        let hidden = self.conv2.forward(&hidden);
+        let hidden = if let Some(state) = state {
+            let hidden = self.conv1.step(&hidden, &mut state.conv1);
+            let hidden = self.act2.forward(&hidden);
+            self.conv2.step(&hidden, &mut state.conv2)
+        } else {
+            let hidden = self.conv1.forward(&hidden);
+            let hidden = self.act2.forward(&hidden);
+            self.conv2.forward(&hidden)
+        };
         residual + hidden
     }
 }
@@ -1071,6 +1283,23 @@ pub struct DecoderBlock {
     snake: SnakeBeta,
     trans_conv: CausalTransConv1d,
     residual_units: Vec<DecoderResidualUnit>,
+}
+
+/// Streaming state for a decoder block.
+pub struct DecoderBlockState {
+    trans_conv: CausalTransConv1dState,
+    residual_units: Vec<DecoderResidualUnitState>,
+}
+
+impl DecoderBlockState {
+    fn new(num_residual_units: usize) -> Self {
+        Self {
+            trans_conv: CausalTransConv1dState::default(),
+            residual_units: (0..num_residual_units)
+                .map(|_| DecoderResidualUnitState::default())
+                .collect(),
+        }
+    }
 }
 
 impl DecoderBlock {
@@ -1126,6 +1355,20 @@ impl DecoderBlock {
         }
         hidden
     }
+
+    /// Incremental forward pass matching MLX `DecoderBlock.step`.
+    pub fn step(&self, x: &Tensor, state: &mut DecoderBlockState) -> Tensor {
+        let hidden = self.snake.forward(x);
+        let mut hidden = self.trans_conv.step(&hidden, &mut state.trans_conv);
+        for (unit, unit_state) in self
+            .residual_units
+            .iter()
+            .zip(state.residual_units.iter_mut())
+        {
+            hidden = unit.step(&hidden, unit_state);
+        }
+        hidden
+    }
 }
 
 /// Complete vocoder decoder for 12Hz model.
@@ -1149,6 +1392,16 @@ pub struct Vocoder {
     /// Configuration
     #[allow(dead_code)]
     config: VocoderConfig,
+}
+
+/// Full streaming state for incremental vocoder decoding.
+pub struct VocoderStreamingState {
+    pre_conv: CausalConv1dState,
+    pre_transformer: VocoderTransformerState,
+    upsample_convnext: Vec<ConvNeXtBlockState>,
+    decoder_first_conv: CausalConv1dState,
+    decoder_blocks: Vec<DecoderBlockState>,
+    final_conv: CausalConv1dState,
 }
 
 impl Vocoder {
@@ -1275,38 +1528,79 @@ impl Vocoder {
         })
     }
 
+    /// Create fresh streaming state for one utterance.
+    pub fn streaming_state(&self) -> VocoderStreamingState {
+        VocoderStreamingState {
+            pre_conv: CausalConv1dState::default(),
+            pre_transformer: VocoderTransformerState::new(self.pre_transformer.layers.len()),
+            upsample_convnext: self
+                .upsample_blocks
+                .iter()
+                .map(|_| ConvNeXtBlockState::default())
+                .collect(),
+            decoder_first_conv: CausalConv1dState::default(),
+            decoder_blocks: self
+                .decoder_blocks
+                .iter()
+                .map(|block| DecoderBlockState::new(block.residual_units.len()))
+                .collect(),
+            final_conv: CausalConv1dState::default(),
+        }
+    }
+
     /// Decode audio codes to waveform.
     /// codes: [batch, num_quantizers, seq_len]
     /// returns: [batch, samples]
     pub fn decode(&self, codes: &Tensor) -> Tensor {
-        // Decode through quantizer: [batch, codebook_dim, seq_len]
         let hidden = self.quantizer.decode(codes);
-
-        // Pre-conv: [batch, latent_dim, seq_len]
         let hidden = self.pre_conv.forward(&hidden);
-
-        // Full pre-transformer pass (8 layers with attention)
         let mut hidden = self.pre_transformer.forward(&hidden);
 
-        // Upsample stages
         for (trans_conv, convnext) in &self.upsample_blocks {
             hidden = trans_conv.forward(&hidden);
             hidden = convnext.forward(&hidden);
         }
 
-        // First decoder conv: latent_dim -> decoder_dim
         hidden = self.decoder_first_conv.forward(&hidden);
-
-        // Decoder blocks
         for block in &self.decoder_blocks {
             hidden = block.forward(&hidden);
         }
 
-        // Final activation and conv
         hidden = self.final_snake.forward(&hidden);
         hidden = self.final_conv.forward(&hidden);
+        hidden.clamp(-1.0, 1.0).squeeze_dim(1)
+    }
 
-        // Clamp output to [-1, 1] and squeeze channel dim
+    /// Incrementally decode only new code frames, matching MLX `decoder.streaming_step`.
+    pub fn decode_streaming(&self, codes: &Tensor, state: &mut VocoderStreamingState) -> Tensor {
+        let hidden = self.quantizer.decode(codes);
+        let hidden = self.pre_conv.step(&hidden, &mut state.pre_conv);
+        let mut hidden = self
+            .pre_transformer
+            .step(&hidden, &mut state.pre_transformer);
+
+        for ((trans_conv, convnext), convnext_state) in self
+            .upsample_blocks
+            .iter()
+            .zip(state.upsample_convnext.iter_mut())
+        {
+            hidden = trans_conv.forward(&hidden);
+            hidden = convnext.step(&hidden, convnext_state);
+        }
+
+        hidden = self
+            .decoder_first_conv
+            .step(&hidden, &mut state.decoder_first_conv);
+        for (block, block_state) in self
+            .decoder_blocks
+            .iter()
+            .zip(state.decoder_blocks.iter_mut())
+        {
+            hidden = block.step(&hidden, block_state);
+        }
+
+        hidden = self.final_snake.forward(&hidden);
+        hidden = self.final_conv.step(&hidden, &mut state.final_conv);
         hidden.clamp(-1.0, 1.0).squeeze_dim(1)
     }
 }
