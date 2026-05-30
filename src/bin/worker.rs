@@ -577,9 +577,19 @@ fn generate_once(worker: Worker, args: &Args) -> anyhow::Result<()> {
     if text.is_empty() {
         anyhow::bail!("provide --text or --text-file");
     }
+    let started = Instant::now();
     let samples = worker.synthesize(&text)?;
+    let elapsed = started.elapsed().as_secs_f64();
+    let audio_seconds = samples.len() as f64 / worker.output_sample_rate as f64;
     let output = args.output.expanduser();
     write_wav_file(path_str(&output)?, &samples, worker.output_sample_rate)?;
+    log_json(json!({
+        "type": "generated",
+        "seconds": round3(elapsed),
+        "audioSeconds": round3(audio_seconds),
+        "rtf": round3(audio_seconds / elapsed),
+        "label": "voice_clone_rust"
+    }));
     log_json(json!({ "type": "output", "path": output.display().to_string() }));
     Ok(())
 }
@@ -677,10 +687,19 @@ fn clear_cancelled(cancelled: &Arc<Mutex<HashSet<u32>>>, request_id: u32) {
 }
 
 fn normalize_language(language: &str) -> String {
-    match language.trim().to_lowercase().as_str() {
-        "de" => "german".to_string(),
-        "en" => "english".to_string(),
-        other => other.to_string(),
+    match language.trim().to_lowercase().replace('_', "-").as_str() {
+        "" | "auto" => "auto".to_string(),
+        "de" | "de-de" => "german".to_string(),
+        "en" | "en-us" | "en-gb" => "english".to_string(),
+        "fr" | "fr-fr" => "french".to_string(),
+        "es" | "es-es" => "spanish".to_string(),
+        "it" | "it-it" => "italian".to_string(),
+        "pt" | "pt-br" | "pt-pt" => "portuguese".to_string(),
+        "ja" | "ja-jp" => "japanese".to_string(),
+        "ko" | "ko-kr" => "korean".to_string(),
+        "zh" | "zh-cn" | "zh-tw" => "chinese".to_string(),
+        "ru" | "ru-ru" => "russian".to_string(),
+        normalized => normalized.to_string(),
     }
 }
 

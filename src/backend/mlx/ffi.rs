@@ -181,7 +181,10 @@ extern "C" {
 
     pub fn mlx_stream_new_device(dev: mlx_device) -> mlx_stream;
     pub fn mlx_stream_free(stream: mlx_stream) -> c_int;
-    pub fn mlx_get_default_stream(dev: mlx_device, res: *mut mlx_stream) -> c_int;
+    pub fn mlx_get_default_stream(res: *mut mlx_stream, dev: mlx_device) -> c_int;
+    pub fn mlx_set_default_stream(stream: mlx_stream) -> c_int;
+    pub fn mlx_default_cpu_stream_new() -> mlx_stream;
+    pub fn mlx_default_gpu_stream_new() -> mlx_stream;
     pub fn mlx_synchronize(stream: mlx_stream) -> c_int;
 
     // -----------------------------------------------------------------------
@@ -208,6 +211,15 @@ extern "C" {
 
     // Matrix multiplication
     pub fn mlx_matmul(res: *mut mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) -> c_int;
+    pub fn mlx_addmm(
+        res: *mut mlx_array,
+        c: mlx_array,
+        a: mlx_array,
+        b: mlx_array,
+        alpha: f32,
+        beta: f32,
+        s: mlx_stream,
+    ) -> c_int;
 
     pub fn mlx_quantized_matmul(
         res: *mut mlx_array,

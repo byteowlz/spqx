@@ -9,6 +9,7 @@
 #[cfg(feature = "mlx")]
 use crate::backend::mlx;
 use crate::tensor::{DType, Device, Tensor};
+use crate::trace::TraceWriter;
 use std::collections::HashMap;
 #[cfg(feature = "tch-backend")]
 use tch::nn;
@@ -32,11 +33,7 @@ impl RMSNorm {
 
     /// Load RMSNorm from pre-loaded weights.
     pub fn from_weights(weight: Tensor, eps: f64) -> Self {
-        // Convert to float32 for stable computation
-        Self {
-            weight: weight.to_dtype(DType::Float32),
-            eps,
-        }
+        Self { weight, eps }
     }
 
     /// Apply RMS normalization.
@@ -120,7 +117,7 @@ impl Linear {
         let weight = weights.get(&format!("{prefix}.weight"))?.to_device(device);
         let bias = weights
             .get(&format!("{prefix}.bias"))
-            .map(|tensor| tensor.to_device(device).to_dtype(DType::Float32));
+            .map(|tensor| tensor.to_device(device));
         #[cfg(feature = "mlx")]
         {
             let scales = weights
@@ -164,7 +161,7 @@ impl Linear {
                 };
             }
             Self {
-                weight: weight.to_dtype(DType::Float32),
+                weight,
                 bias,
                 quantization: None,
             }
@@ -199,7 +196,21 @@ impl Linear {
         let out = x.matmul(&self.weight.tr());
 
         if let Some(ref bias) = self.bias {
-            &out + bias
+            #[cfg(feature = "mlx")]
+            {
+                if self.quantization.is_some() {
+                    return &out + bias;
+                }
+                return Tensor::from_mlx(mlx::ops::addmm(
+                    bias.as_mlx(),
+                    x.as_mlx(),
+                    self.weight.tr().as_mlx(),
+                ));
+            }
+            #[cfg(not(feature = "mlx"))]
+            {
+                &out + bias
+            }
         } else {
             out
         }
@@ -367,6 +378,7 @@ impl KVCache {
 pub struct RotaryEmbedding {
     cos_cache: Tensor,
     sin_cache: Tensor,
+    inv_freq: Tensor,
     dim: i64,
     _theta: f64,
 }
@@ -398,6 +410,7 @@ impl RotaryEmbedding {
         Self {
             cos_cache,
             sin_cache,
+            inv_freq,
             dim,
             _theta: theta,
         }
@@ -409,7 +422,6 @@ impl RotaryEmbedding {
     }
 
     /// Apply rotary embedding with a cache offset for incremental decoding.
-    #[allow(unused_variables)]
     pub fn forward_with_offset(
         &self,
         q: &Tensor,
@@ -417,46 +429,24 @@ impl RotaryEmbedding {
         seq_len: i64,
         offset: i64,
     ) -> (Tensor, Tensor) {
-        // Use MLX fused RoPE kernel for better performance on Apple Silicon
-        #[cfg(feature = "mlx")]
-        {
-            // fast_rope applies RoPE using dim -2 as the sequence dimension.
-            // Our inputs are [batch, heads, seq, head_dim], where dim -2 = seq.
-            // Do NOT transpose — the layout is already correct.
-            let base = mlx::array::MlxArray::scalar_f32(self._theta as f32);
+        let positions = Tensor::arange_f(
+            offset as f64,
+            (offset + seq_len) as f64,
+            1.0,
+            DType::Float32,
+            q.device(),
+        )
+        .view(&[seq_len, 1]);
+        let freqs = positions.matmul(&self.inv_freq.view(&[1, self.dim / 2]));
+        let cos = freqs.cos().to_dtype(q.kind());
+        let sin = freqs.sin().to_dtype(q.kind());
 
-            let q_rope = Tensor::from_mlx(mlx::ops::fast_rope(
-                q.as_mlx(),
-                self.dim as i32,
-                false, // GPT-NeoX style (not traditional)
-                Some(&base),
-                1.0, // scale
-                offset as i32,
-            ));
-            let k_rope = Tensor::from_mlx(mlx::ops::fast_rope(
-                k.as_mlx(),
-                self.dim as i32,
-                false,
-                Some(&base),
-                1.0,
-                offset as i32,
-            ));
+        let q_embed = self.apply_rope(q, &cos, &sin);
+        let k_embed = self.apply_rope(k, &cos, &sin);
 
-            return (q_rope, k_rope);
-        }
-        #[cfg(not(feature = "mlx"))]
-        {
-            let cos = self.cos_cache.narrow(0, offset, seq_len);
-            let sin = self.sin_cache.narrow(0, offset, seq_len);
-
-            let q_embed = self.apply_rope(q, &cos, &sin);
-            let k_embed = self.apply_rope(k, &cos, &sin);
-
-            (q_embed, k_embed)
-        }
+        (q_embed, k_embed)
     }
 
-    #[cfg(not(feature = "mlx"))]
     fn apply_rope(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
         let half_dim = self.dim / 2;
 
@@ -593,48 +583,37 @@ impl Attention {
             .view(&[batch_size, seq_len, self.num_kv_heads, self.head_dim])
             .transpose(1, 2);
 
-        // Apply Q/K normalization if present (RMS norm per head)
-        // Qwen3 QK norm weights have shape [num_heads, head_dim] and need to be reshaped
+        // Apply Q/K normalization if present (RMS norm per head).
         let query = if let Some(ref q_norm) = self.q_norm {
-            let eps = 1e-6;
-            let variance = query.pow_scalar(2.0).mean_dim(&[-1], true);
-            let rms = (variance + eps).sqrt().clamp_min(1e-8);
-            let normalized = query / rms;
-            // q_norm is [num_heads * head_dim], reshape to [1, num_heads, 1, head_dim] for broadcasting
-            let q_norm_shape = q_norm.size();
-            if q_norm_shape.len() == 1 && q_norm_shape[0] == self.num_heads * self.head_dim {
-                // Reshape from [num_heads * head_dim] to [1, num_heads, 1, head_dim]
-                let q_norm_reshaped = q_norm.view(&[1, self.num_heads, 1, self.head_dim]);
-                normalized * q_norm_reshaped
-            } else if q_norm_shape.len() == 1 && q_norm_shape[0] == self.head_dim {
-                // Shape is [head_dim], broadcast directly
+            #[cfg(feature = "mlx")]
+            {
+                Tensor::from_mlx(mlx::ops::fast_rms_norm(
+                    query.as_mlx(),
+                    q_norm.as_mlx(),
+                    1e-6,
+                ))
+            }
+            #[cfg(not(feature = "mlx"))]
+            {
+                let variance = query.pow_scalar(2.0).mean_dim(&[-1], true);
+                let rms = (variance + 1e-6).sqrt().clamp_min(1e-8);
+                let normalized = query / rms;
                 normalized * q_norm
-            } else {
-                // Unknown shape, skip norm
-                println!("Warning: Unexpected q_norm shape {:?}", q_norm_shape);
-                normalized
             }
         } else {
             query
         };
         let key = if let Some(ref k_norm) = self.k_norm {
-            let eps = 1e-6;
-            let variance = key.pow_scalar(2.0).mean_dim(&[-1], true);
-            let rms = (variance + eps).sqrt().clamp_min(1e-8);
-            let normalized = key / rms;
-            // k_norm might be [num_kv_heads * head_dim] for GQA
-            let k_norm_shape = k_norm.size();
-            if k_norm_shape.len() == 1 && k_norm_shape[0] == self.num_kv_heads * self.head_dim {
-                // Reshape from [num_kv_heads * head_dim] to [1, num_kv_heads, 1, head_dim]
-                let k_norm_reshaped = k_norm.view(&[1, self.num_kv_heads, 1, self.head_dim]);
-                normalized * k_norm_reshaped
-            } else if k_norm_shape.len() == 1 && k_norm_shape[0] == self.head_dim {
-                // Shape is [head_dim], broadcast directly
+            #[cfg(feature = "mlx")]
+            {
+                Tensor::from_mlx(mlx::ops::fast_rms_norm(key.as_mlx(), k_norm.as_mlx(), 1e-6))
+            }
+            #[cfg(not(feature = "mlx"))]
+            {
+                let variance = key.pow_scalar(2.0).mean_dim(&[-1], true);
+                let rms = (variance + 1e-6).sqrt().clamp_min(1e-8);
+                let normalized = key / rms;
                 normalized * k_norm
-            } else {
-                // Unknown shape, skip norm
-                println!("Warning: Unexpected k_norm shape {:?}", k_norm_shape);
-                normalized
             }
         } else {
             key
@@ -733,6 +712,106 @@ impl Attention {
 
         // Output projection
         self.o_proj.forward(&attn_output)
+    }
+
+    fn forward_with_cache_trace(
+        &self,
+        hidden_states: &Tensor,
+        rotary_emb: &RotaryEmbedding,
+        attention_mask: Option<&Tensor>,
+        cache: Option<&mut KVCache>,
+        trace: &mut TraceWriter,
+        prefix: &str,
+    ) -> std::io::Result<Tensor> {
+        let size = hidden_states.size();
+        let batch_size = size[0];
+        let seq_len = size[1];
+        let query = self.q_proj.forward(hidden_states);
+        let key = self.k_proj.forward(hidden_states);
+        let value = self.v_proj.forward(hidden_states);
+        let query = query
+            .view(&[batch_size, seq_len, self.num_heads, self.head_dim])
+            .transpose(1, 2);
+        let key = key
+            .view(&[batch_size, seq_len, self.num_kv_heads, self.head_dim])
+            .transpose(1, 2);
+        let value = value
+            .view(&[batch_size, seq_len, self.num_kv_heads, self.head_dim])
+            .transpose(1, 2);
+        let query = if let Some(ref q_norm) = self.q_norm {
+            #[cfg(feature = "mlx")]
+            {
+                Tensor::from_mlx(mlx::ops::fast_rms_norm(
+                    query.as_mlx(),
+                    q_norm.as_mlx(),
+                    1e-6,
+                ))
+            }
+            #[cfg(not(feature = "mlx"))]
+            {
+                let variance = query.pow_scalar(2.0).mean_dim(&[-1], true);
+                let rms = (variance + 1e-6).sqrt().clamp_min(1e-8);
+                (query / rms) * q_norm
+            }
+        } else {
+            query
+        };
+        let key = if let Some(ref k_norm) = self.k_norm {
+            #[cfg(feature = "mlx")]
+            {
+                Tensor::from_mlx(mlx::ops::fast_rms_norm(key.as_mlx(), k_norm.as_mlx(), 1e-6))
+            }
+            #[cfg(not(feature = "mlx"))]
+            {
+                let variance = key.pow_scalar(2.0).mean_dim(&[-1], true);
+                let rms = (variance + 1e-6).sqrt().clamp_min(1e-8);
+                (key / rms) * k_norm
+            }
+        } else {
+            key
+        };
+        trace.tensor(&format!("{prefix}/q_normed"), &query)?;
+        trace.tensor(&format!("{prefix}/k_normed"), &key)?;
+        let cache_offset = cache.as_ref().map(|cache| cache.len()).unwrap_or(0);
+        let (query, key) = rotary_emb.forward_with_offset(&query, &key, seq_len, cache_offset);
+        trace.tensor(&format!("{prefix}/q_rope"), &query)?;
+        trace.tensor(&format!("{prefix}/k_rope"), &key)?;
+        let (key, value) = if let Some(cache) = cache {
+            cache.update_and_fetch(key, value)
+        } else {
+            (key, value)
+        };
+        trace.tensor(&format!("{prefix}/cache_key"), &key)?;
+        trace.tensor(&format!("{prefix}/cache_value"), &value)?;
+        #[cfg(feature = "mlx")]
+        let attn_output = {
+            let scale = 1.0 / (self.head_dim as f64).sqrt();
+            Tensor::from_mlx(mlx::ops::fast_scaled_dot_product_attention(
+                query.as_mlx(),
+                key.as_mlx(),
+                value.as_mlx(),
+                scale as f32,
+                attention_mask.map(|m| m.as_mlx()),
+            ))
+        };
+        #[cfg(not(feature = "mlx"))]
+        let attn_output = {
+            let scale = (self.head_dim as f64).sqrt();
+            let attn_weights = query.matmul(&key.transpose(-2, -1)) / scale;
+            let attn_weights = if let Some(mask) = attention_mask {
+                attn_weights + mask
+            } else {
+                attn_weights
+            };
+            attn_weights.softmax(-1).matmul(&value)
+        };
+        trace.tensor(&format!("{prefix}/sdpa"), &attn_output)?;
+        let attn_output = attn_output.transpose(1, 2).contiguous().view(&[
+            batch_size,
+            seq_len,
+            self.num_heads * self.head_dim,
+        ]);
+        Ok(self.o_proj.forward(&attn_output))
     }
 
     /// Forward with debug output
@@ -992,12 +1071,10 @@ impl TransformerLayer {
 
         let input_layernorm_weight = weights
             .get(&format!("{}.input_layernorm.weight", prefix))?
-            .to_device(device)
-            .to_dtype(DType::Float32);
+            .to_device(device);
         let post_attention_layernorm_weight = weights
             .get(&format!("{}.post_attention_layernorm.weight", prefix))?
-            .to_device(device)
-            .to_dtype(DType::Float32);
+            .to_device(device);
 
         Some(Self {
             self_attn,
@@ -1042,6 +1119,56 @@ impl TransformerLayer {
         let hidden = self.mlp.forward(&hidden_norm);
 
         residual + hidden
+    }
+
+    /// Apply the transformer layer and write selected tensors for parity tracing.
+    pub fn forward_with_cache_trace(
+        &self,
+        hidden_states: &Tensor,
+        rotary_emb: &RotaryEmbedding,
+        attention_mask: Option<&Tensor>,
+        cache: Option<&mut KVCache>,
+        trace: &mut TraceWriter,
+        prefix: &str,
+    ) -> std::io::Result<Tensor> {
+        let residual = hidden_states;
+        let hidden = self.input_layernorm.forward(hidden_states);
+        trace.tensor(
+            &format!("{prefix}/norm1"),
+            &hidden.select(1, hidden.size()[1] - 1).unsqueeze(1),
+        )?;
+        let hidden = self.self_attn.forward_with_cache_trace(
+            &hidden,
+            rotary_emb,
+            attention_mask,
+            cache,
+            trace,
+            &format!("{prefix}/attn_detail"),
+        )?;
+        trace.tensor(
+            &format!("{prefix}/attn"),
+            &hidden.select(1, hidden.size()[1] - 1).unsqueeze(1),
+        )?;
+        let hidden = residual + hidden;
+        trace.tensor(
+            &format!("{prefix}/after_attn"),
+            &hidden.select(1, hidden.size()[1] - 1).unsqueeze(1),
+        )?;
+
+        let residual = &hidden;
+        let hidden_norm = self.post_attention_layernorm.forward(&hidden);
+        trace.tensor(
+            &format!("{prefix}/norm2"),
+            &hidden_norm
+                .select(1, hidden_norm.size()[1] - 1)
+                .unsqueeze(1),
+        )?;
+        let hidden = self.mlp.forward(&hidden_norm);
+        trace.tensor(
+            &format!("{prefix}/mlp"),
+            &hidden.select(1, hidden.size()[1] - 1).unsqueeze(1),
+        )?;
+        Ok(residual + hidden)
     }
 
     /// Forward with debug output (for first layer only)

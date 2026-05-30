@@ -13,11 +13,36 @@ use crate::config::{Qwen3TTSConfig, TalkerCodePredictorConfig, TalkerConfig};
 use crate::error::{Qwen3TTSError, Result};
 use crate::layers::{KVCache, Linear, RMSNorm, RotaryEmbedding, TransformerLayer};
 use crate::tensor::{DType, Device, Tensor};
+use crate::trace::TraceWriter;
 use crate::vocoder::{load_vocoder_weights, Vocoder, VocoderConfig, VocoderStreamingState};
+use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
 use tokenizers::pre_tokenizers::byte_level::ByteLevel;
 use tokenizers::Tokenizer;
+
+fn round_f32_to_bf16_value(value: f32) -> f32 {
+    let bits = value.to_bits();
+    let rounding_bias = 0x7fff + ((bits >> 16) & 1);
+    f32::from_bits(bits.wrapping_add(rounding_bias) & 0xffff_0000)
+}
+
+fn add_tensors_as_rounded_bf16_values(left: &Tensor, right: &Tensor) -> Tensor {
+    let shape = left.size();
+    let left_values = left.to_vec_f32();
+    let right_values = right.to_vec_f32();
+    debug_assert_eq!(left_values.len() % right_values.len(), 0);
+    let values = left_values
+        .iter()
+        .enumerate()
+        .map(|(index, left)| {
+            round_f32_to_bf16_value(left + right_values[index % right_values.len()])
+        })
+        .collect::<Vec<_>>();
+    Tensor::from_slice_f32(&values)
+        .reshape(&shape)
+        .to_device(left.device())
+}
 
 /// Code predictor sub-transformer for generating codes 1-15 autoregressively.
 ///
@@ -70,7 +95,7 @@ impl CodePredictor {
         for i in 0..(num_code_groups - 1) {
             let key = format!("talker.code_predictor.model.codec_embedding.{}.weight", i);
             if let Some(tensor) = weights.get(&key) {
-                code_embeddings.push(tensor.to_device(device).to_dtype(DType::Float32));
+                code_embeddings.push(tensor.to_device(device));
             }
         }
         println!(
@@ -104,8 +129,7 @@ impl CodePredictor {
         let norm_weight = weights
             .get("talker.code_predictor.model.norm.weight")
             .ok_or_else(|| Qwen3TTSError::ModelLoad("Missing code_predictor norm.weight".into()))?
-            .to_device(device)
-            .to_dtype(DType::Float32);
+            .to_device(device);
         let norm = RMSNorm::from_weights(norm_weight, rms_norm_eps);
 
         // Load LM heads (15 for codes 1-15)
@@ -163,6 +187,28 @@ impl CodePredictor {
         top_k: i64,
         caches: &mut [KVCache],
     ) -> Vec<i64> {
+        self.generate_codes_inner(
+            main_hidden,
+            code_0_embedding,
+            temperature,
+            top_k,
+            caches,
+            None,
+            None,
+        )
+        .unwrap_or_default()
+    }
+
+    fn generate_codes_inner(
+        &self,
+        main_hidden: &Tensor,
+        code_0_embedding: &Tensor,
+        temperature: f64,
+        top_k: i64,
+        caches: &mut [KVCache],
+        mut trace: Option<(&mut TraceWriter, i64, usize)>,
+        forced_codes: Option<&[i64]>,
+    ) -> std::io::Result<Vec<i64>> {
         let mut codes = Vec::new();
         for cache in caches.iter_mut() {
             cache.clear();
@@ -176,6 +222,15 @@ impl CodePredictor {
         );
 
         for step in 0..self.lm_heads.len() {
+            if let Some((trace, generation_step, _)) = trace.as_mut() {
+                trace.tensor(
+                    &format!(
+                        "generation/step_{:04}/predictor_{step:02}_input",
+                        *generation_step
+                    ),
+                    &input,
+                )?;
+            }
             let seq_len = input.size()[1];
             let causal_mask = if step == 0 && seq_len > 1 {
                 let mask = Tensor::zeros(&[seq_len, seq_len], DType::Float32, self.device);
@@ -193,20 +248,72 @@ impl CodePredictor {
             } else {
                 input.shallow_clone()
             };
-            for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
-                hidden = layer.forward_with_cache(
-                    &hidden,
-                    &self.rotary_emb,
-                    causal_mask.as_ref(),
-                    Some(cache),
-                );
+            for (layer_index, (layer, cache)) in
+                self.layers.iter().zip(caches.iter_mut()).enumerate()
+            {
+                if let Some((trace, generation_step, _)) = trace.as_mut() {
+                    hidden = if layer_index == 0 {
+                        layer.forward_with_cache_trace(
+                            &hidden,
+                            &self.rotary_emb,
+                            causal_mask.as_ref(),
+                            Some(cache),
+                            trace,
+                            &format!(
+                                "generation/step_{:04}/predictor_{step:02}_layer_00_detail",
+                                *generation_step
+                            ),
+                        )?
+                    } else {
+                        layer.forward_with_cache(
+                            &hidden,
+                            &self.rotary_emb,
+                            causal_mask.as_ref(),
+                            Some(cache),
+                        )
+                    };
+                    trace.tensor(
+                        &format!(
+                            "generation/step_{:04}/predictor_{step:02}_layer_{layer_index:02}",
+                            *generation_step
+                        ),
+                        &hidden,
+                    )?;
+                } else {
+                    hidden = layer.forward_with_cache(
+                        &hidden,
+                        &self.rotary_emb,
+                        causal_mask.as_ref(),
+                        Some(cache),
+                    );
+                }
             }
 
             let normed = self.norm.forward(&hidden);
             let logits = self.lm_heads[step]
                 .forward(&normed.select(1, seq_len - 1).unsqueeze(0))
                 .squeeze_dim(0);
-            let code = if temperature <= 0.0 {
+            if let Some((trace, generation_step, trace_topk)) = trace.as_mut() {
+                trace.tensor(
+                    &format!(
+                        "generation/step_{:04}/predictor_{step:02}_logits",
+                        *generation_step
+                    ),
+                    &logits,
+                )?;
+                trace.topk(
+                    &format!(
+                        "generation/step_{:04}/predictor_{step:02}_topk",
+                        *generation_step
+                    ),
+                    &logits,
+                    *trace_topk,
+                )?;
+            }
+            let forced_code = forced_codes.and_then(|codes| codes.get(step)).copied();
+            let code = if let Some(forced_code) = forced_code {
+                forced_code
+            } else if temperature <= 0.0 {
                 logits.argmax(-1, false).int64_value(&[0])
             } else {
                 let logits = &logits / temperature;
@@ -232,7 +339,7 @@ impl CodePredictor {
             }
         }
 
-        codes
+        Ok(codes)
     }
 }
 
@@ -297,8 +404,7 @@ impl TalkerModel {
         let text_embedding = weights
             .get("talker.model.text_embedding.weight")
             .ok_or_else(|| Qwen3TTSError::ModelLoad("Missing text_embedding.weight".into()))?
-            .to_device(device)
-            .to_dtype(DType::Float32);
+            .to_device(device);
         println!("  Loaded text_embedding: {:?}", text_embedding.size());
 
         // Load text projection layers (2048 -> 1024)
@@ -320,8 +426,7 @@ impl TalkerModel {
             .ok_or_else(|| {
                 Qwen3TTSError::ModelLoad("Missing talker.model.codec_embedding.weight".into())
             })?
-            .to_device(device)
-            .to_dtype(DType::Float32);
+            .to_device(device);
         println!("  Loaded codec_embedding: {:?}", codec_embedding.size());
 
         // Load transformer layers
@@ -350,8 +455,7 @@ impl TalkerModel {
         let norm_weight = weights
             .get("talker.model.norm.weight")
             .ok_or_else(|| Qwen3TTSError::ModelLoad("Missing norm.weight".into()))?
-            .to_device(device)
-            .to_dtype(DType::Float32);
+            .to_device(device);
         let norm = RMSNorm::from_weights(norm_weight, rms_norm_eps);
         println!("  Loaded final norm");
 
@@ -390,13 +494,33 @@ impl TalkerModel {
     /// Embed text token IDs through text_embedding → text_projection (2048 → 1024).
     fn embed_text(&self, token_ids: &[i64]) -> Tensor {
         let ids = Tensor::from_slice_i64(token_ids).to_device(self.device);
-        let embedded = self.text_embedding.index_select(0, &ids); // [N, 2048]
+        let embedded = self
+            .text_embedding
+            .index_select(0, &ids)
+            .unsqueeze(0)
+            .contiguous(); // [1, N, 2048]
 
-        // Text projection: FC1(2048→2048) with GELU, then FC2(2048→1024)
-        let h = self.text_proj_fc1.forward(&embedded).gelu();
-        let projected = self.text_proj_fc2.forward(&h);
+        // Text projection: FC1(2048→2048) with SiLU, then FC2(2048→1024)
+        let h = self.text_proj_fc1.forward(&embedded).silu();
+        self.text_proj_fc2.forward(&h) // [1, N, 1024]
+    }
 
-        projected.unsqueeze(0) // [1, N, 1024]
+    fn trace_text_projection(
+        &self,
+        name: &str,
+        token_ids: &[i64],
+        trace: &mut TraceWriter,
+    ) -> Result<Tensor> {
+        let ids = Tensor::from_slice_i64(token_ids).to_device(self.device);
+        let embedded = self.text_embedding.index_select(0, &ids).unsqueeze(0);
+        trace.tensor(&format!("prepare/{name}/raw"), &embedded)?;
+        let fc1 = self.text_proj_fc1.forward(&embedded);
+        trace.tensor(&format!("prepare/{name}/fc1"), &fc1)?;
+        let act = fc1.silu();
+        trace.tensor(&format!("prepare/{name}/act"), &act)?;
+        let projected = self.text_proj_fc2.forward(&act);
+        trace.tensor(&format!("prepare/{name}/fc2"), &projected)?;
+        Ok(projected)
     }
 
     /// Embed codec token IDs through codec_embedding (3072 → 1024).
@@ -606,10 +730,9 @@ impl TalkerModel {
     /// (x-vector) is still used in the codec prefix.
     ///
     /// Structure:
-    /// - Codec prefix (6 positions): same as x-vector mode with speaker embedding
+    /// - Codec prefix: same as Python MLX with optional language ID and speaker embedding
     /// - ICL text: all ref_text + synth_text tokens + tts_eos, paired with codec_pad
     /// - ICL codec: codec_bos + ref codec frame embeddings (sum of 16 groups), paired with tts_pad
-    /// - Final codec_bos to start generation
     #[allow(clippy::too_many_arguments)]
     pub fn build_input_embeddings_with_icl(
         &self,
@@ -617,34 +740,45 @@ impl TalkerModel {
         synth_text_token_ids: &[i64],
         ref_codes: &[Vec<i64>],
         speaker_embedding: &Tensor,
-        language_id: i64,
+        language_id: Option<i64>,
         tts_pad_id: i64,
         tts_bos_id: i64,
         tts_eos_id: i64,
         codec_think_id: i64,
+        codec_nothink_id: i64,
         codec_think_bos_id: i64,
         codec_think_eos_id: i64,
         codec_pad_id: i64,
         codec_bos_id: i64,
+        mut trace: Option<&mut TraceWriter>,
     ) -> Tensor {
         // Phase 1: Role prefix (3 text-only positions)
         // First 3 tokens of ref_text are [im_start, assistant, \n] — standalone, no codec pairing
         let role_tokens = &ref_text_token_ids[..3];
         let role_embed = self.embed_text(role_tokens); // [1, 3, 1024]
+        if let Some(trace) = trace.as_deref_mut() {
+            let _ = trace.tensor("prepare/role_embed", &role_embed);
+        }
 
-        // Phase 2: Codec prefix with x-vector (6 summed positions)
-        // Text side: tts_pad * 5 + tts_bos
-        let tts_pad_embed = self.embed_text(&[tts_pad_id]); // [1, 1, 1024]
-        let tts_bos_embed = self.embed_text(&[tts_bos_id]); // [1, 1, 1024]
-        let tts_eos_embed = self.embed_text(&[tts_eos_id]); // [1, 1, 1024]
+        // Phase 2: Codec prefix with x-vector. Compute special TTS embeds in one
+        // batch, matching Python MLX Linear/addmm numerics.
+        let tts_embeds = self.embed_text(&[tts_bos_id, tts_eos_id, tts_pad_id]);
+        let tts_bos_embed = tts_embeds.narrow(1, 0, 1); // [1, 1, 1024]
+        let tts_eos_embed = tts_embeds.narrow(1, 1, 1); // [1, 1, 1024]
+        let tts_pad_embed = tts_embeds.narrow(1, 2, 1); // [1, 1, 1024]
 
-        // Codec prefix tokens (without speaker_id — inject x-vector at position 4)
-        let codec_tokens_before_speaker = self.embed_codec(&[
-            codec_think_id,
-            codec_think_bos_id,
-            language_id,
-            codec_think_eos_id,
-        ]); // [1, 4, 1024]
+        // Codec prefix tokens (without speaker_id — inject x-vector before pad/bos).
+        let codec_prefill = if let Some(language_id) = language_id {
+            vec![
+                codec_think_id,
+                codec_think_bos_id,
+                language_id,
+                codec_think_eos_id,
+            ]
+        } else {
+            vec![codec_nothink_id, codec_think_bos_id, codec_think_eos_id]
+        };
+        let codec_tokens_before_speaker = self.embed_codec(&codec_prefill);
 
         // Speaker embedding
         let spk_embed = speaker_embedding.to_device(self.device);
@@ -665,15 +799,23 @@ impl TalkerModel {
                 codec_tokens_after_speaker,
             ],
             1,
-        ); // [1, 7, 1024]
+        );
+        if let Some(trace) = trace.as_deref_mut() {
+            let _ = trace.tensor("prepare/codec_prefix_embed", &codec_prefix);
+        }
 
-        // Text side for codec prefix: tts_pad * 5 + tts_bos
-        let tts_pad_5 = tts_pad_embed.expand(&[1, 5, self.hidden_size], false);
-        let text_for_codec = Tensor::cat(&[tts_pad_5, tts_bos_embed.shallow_clone()], 1); // [1, 6, 1024]
+        // Text side for codec prefix: tts_pad * (codec_prefix_len - 2) + tts_bos.
+        let prefix_positions = codec_prefix.size()[1] - 1;
+        let pad_count = prefix_positions - 1;
+        let tts_pad_prefix = tts_pad_embed.expand(&[1, pad_count, self.hidden_size], false);
+        let text_for_codec = Tensor::cat(&[tts_pad_prefix, tts_bos_embed.shallow_clone()], 1);
 
-        // Sum text + codec (first 6 of 7 codec prefix positions)
-        let codec_prefix_6 = codec_prefix.narrow(1, 0, 6);
-        let phase2 = &text_for_codec + &codec_prefix_6; // [1, 6, 1024]
+        // Sum text + codec, excluding the final codec_bos position.
+        let codec_prefix_without_bos = codec_prefix.narrow(1, 0, prefix_positions);
+        let phase2 = &text_for_codec + &codec_prefix_without_bos;
+        if let Some(trace) = trace.as_deref_mut() {
+            let _ = trace.tensor("prepare/combined_prefix", &phase2);
+        }
 
         // Phase 3: ICL text stream
         // Use pure text tokens only (strip role markers), matching Python:
@@ -684,14 +826,33 @@ impl TalkerModel {
         let mut all_text_ids = Vec::new();
         all_text_ids.extend_from_slice(ref_pure);
         all_text_ids.extend_from_slice(synth_pure);
-        let text_embed = self.embed_text(&all_text_ids); // [1, T_text, 1024]
+        let text_embed = if let Some(trace) = trace.as_deref_mut() {
+            let ids = Tensor::from_slice_i64(&all_text_ids).to_device(self.device);
+            let raw = self
+                .text_embedding
+                .index_select(0, &ids)
+                .unsqueeze(0)
+                .contiguous();
+            let _ = trace.tensor("prepare/text_projection/raw", &raw);
+            let fc1 = self.text_proj_fc1.forward(&raw);
+            let _ = trace.tensor("prepare/text_projection/fc1", &fc1);
+            let act = fc1.silu();
+            let _ = trace.tensor("prepare/text_projection/act", &act);
+            let projected = self.text_proj_fc2.forward(&act);
+            let _ = trace.tensor("prepare/text_projection/fc2", &projected);
+            projected
+        } else {
+            self.embed_text(&all_text_ids)
+        }; // [1, T_text, 1024]
         let text_embed = Tensor::cat(&[text_embed, tts_eos_embed], 1); // [1, T_text+1, 1024]
+        if let Some(trace) = trace.as_deref_mut() {
+            let _ = trace.tensor("prepare/text_embed_with_eos", &text_embed);
+        }
         let text_len = text_embed.size()[1];
 
         // Pair each text position with codec_pad
         let codec_pad_embed = self.embed_codec(&[codec_pad_id]); // [1, 1, 1024]
-        let codec_pad_repeated = codec_pad_embed.expand(&[1, text_len, self.hidden_size], false);
-        let phase3 = &text_embed + &codec_pad_repeated; // [1, T_text+1, 1024]
+        let phase3 = add_tensors_as_rounded_bf16_values(&text_embed, &codec_pad_embed); // [1, T_text+1, 1024]
 
         // Phase 4: ICL codec stream
         // codec_bos + ref codec frame embeddings, paired with tts_pad
@@ -701,17 +862,17 @@ impl TalkerModel {
         let num_ref_frames = ref_codes.len();
         let mut ref_codec_embeds = Vec::new();
         for frame_codes in ref_codes {
-            let mut frame_embed =
-                Tensor::zeros(&[1, 1, self.hidden_size], DType::Float32, self.device);
-            // Code 0: use main codec_embedding
-            if !frame_codes.is_empty() {
-                let code0_ids = Tensor::from_slice_i64(&[frame_codes[0]]).to_device(self.device);
-                let code0_embed = self
-                    .codec_embedding
+            // Code 0: use main codec_embedding. Start from the BF16 embedding itself,
+            // matching Python's accumulation dtype instead of promoting through a
+            // Float32 zero tensor.
+            let mut frame_embed = if let Some(&code0) = frame_codes.first() {
+                let code0_ids = Tensor::from_slice_i64(&[code0]).to_device(self.device);
+                self.codec_embedding
                     .index_select(0, &code0_ids)
-                    .unsqueeze(0);
-                frame_embed = &frame_embed + &code0_embed;
-            }
+                    .unsqueeze(0)
+            } else {
+                Tensor::zeros(&[1, 1, self.hidden_size], DType::BFloat16, self.device)
+            };
             // Codes 1-15: use code_predictor embeddings
             for (i, &code) in frame_codes.iter().enumerate().skip(1) {
                 if i - 1 < self.code_predictor.code_embeddings.len() {
@@ -725,26 +886,33 @@ impl TalkerModel {
             ref_codec_embeds.push(frame_embed);
         }
 
+        let ref_codec_embed_sum = Tensor::cat(&ref_codec_embeds, 1);
+        if let Some(trace) = trace.as_deref_mut() {
+            let _ = trace.tensor("prepare/ref_codec_embed_sum", &ref_codec_embed_sum);
+        }
+
         // Concatenate: codec_bos + ref_codec_frames → [1, 1+R, 1024]
-        let mut codec_parts = vec![codec_bos_embed];
-        codec_parts.extend(ref_codec_embeds);
-        let codec_stream = Tensor::cat(&codec_parts, 1); // [1, 1+R, 1024]
+        let codec_stream = Tensor::cat(&[codec_bos_embed, ref_codec_embed_sum], 1); // [1, 1+R, 1024]
+        if let Some(trace) = trace.as_deref_mut() {
+            let _ = trace.tensor("prepare/codec_embed_icl", &codec_stream);
+        }
         let codec_len = codec_stream.size()[1];
 
         // Pair each codec position with tts_pad
-        let tts_pad_repeated = tts_pad_embed.expand(&[1, codec_len, self.hidden_size], false);
-        let phase4 = &codec_stream + &tts_pad_repeated; // [1, 1+R, 1024]
+        let phase4 = add_tensors_as_rounded_bf16_values(&codec_stream, &tts_pad_embed); // [1, 1+R, 1024]
+        let icl_input_embed = Tensor::cat(&[phase3, phase4], 1);
+        if let Some(trace) = trace.as_deref_mut() {
+            let _ = trace.tensor("prepare/icl_input_embed", &icl_input_embed);
+        }
 
-        // Phase 5: Final codec_bos to start generation
-        let final_codec_bos = codec_prefix.narrow(1, 6, 1); // Last position of codec prefix [1, 1, 1024]
-        let phase5 = &tts_pad_embed + &final_codec_bos; // [1, 1, 1024]
-
-        // Concatenate all phases
-        let input_embeddings = Tensor::cat(&[role_embed, phase2, phase3, phase4, phase5], 1);
+        // Concatenate all phases. Python MLX stops here; the codec stream already starts
+        // with codec_bos, so adding another final codec_bos shifts generation by one token.
+        let input_embeddings = Tensor::cat(&[role_embed, phase2, icl_input_embed], 1);
 
         println!(
-            "  Built ICL input embeddings: {} positions (3 role + 6 codec_prefix + {} text + {} codec + 1 bos)",
+            "  Built ICL input embeddings: {} positions (3 role + {} codec_prefix + {} text + {} codec)",
             input_embeddings.size()[1],
+            prefix_positions,
             text_len,
             codec_len
         );
@@ -774,6 +942,43 @@ impl TalkerModel {
         }
 
         self.norm.forward(&hidden)
+    }
+
+    fn forward_embeds_with_cache_traced(
+        &self,
+        embeddings: &Tensor,
+        attention_mask: Option<&Tensor>,
+        caches: &mut [KVCache],
+        trace: &mut TraceWriter,
+        step: i64,
+    ) -> Result<Tensor> {
+        let mut hidden = embeddings.shallow_clone();
+
+        for (layer_index, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate() {
+            hidden = if layer_index <= 4 {
+                layer.forward_with_cache_trace(
+                    &hidden,
+                    &self.rotary_emb,
+                    attention_mask,
+                    Some(cache),
+                    trace,
+                    &format!("generation/step_{step:04}/talker_layer_{layer_index:02}_detail"),
+                )?
+            } else {
+                layer.forward_with_cache(&hidden, &self.rotary_emb, attention_mask, Some(cache))
+            };
+            trace.tensor(
+                &format!("generation/step_{step:04}/talker_layer_{layer_index:02}"),
+                &hidden.select(1, hidden.size()[1] - 1).unsqueeze(1),
+            )?;
+        }
+
+        let normed = self.norm.forward(&hidden);
+        trace.tensor(
+            &format!("generation/step_{step:04}/talker_norm"),
+            &normed.select(1, normed.size()[1] - 1).unsqueeze(1),
+        )?;
+        Ok(normed)
     }
 
     /// Predict code 0 from normed hidden states at the last position.
@@ -944,7 +1149,7 @@ impl TalkerModel {
                 }
             }
 
-            let next_input = &code_embeds_sum + tts_pad_embed;
+            let next_input = (&code_embeds_sum + tts_pad_embed).to_dtype(DType::BFloat16);
             normed_hidden = self.forward_embeds_with_cache(&next_input, None, &mut caches);
 
             if pending_codes.len() >= chunk_size {
@@ -1670,11 +1875,12 @@ impl TTSInference {
             .as_ref()
             .and_then(|map| map.get(&language.to_lowercase()))
             .copied()
-            .unwrap_or(0) as i64;
+            .map(i64::from);
 
         // Get codec special token IDs
         let codec_eos_id = self.config.talker_config.codec_eos_token_id as i64;
         let codec_think_id = self.config.talker_config.codec_think_id as i64;
+        let codec_nothink_id = self.config.talker_config.codec_nothink_id as i64;
         let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
         let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
         let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
@@ -1684,7 +1890,7 @@ impl TTSInference {
         let tts_eos_id = self.config.tts_eos_token_id as i64;
 
         println!(
-            "ICL voice clone: Language: {} (id={})",
+            "ICL voice clone: Language: {} (id={:?})",
             language, language_id
         );
         println!("  Reference text: \"{}\"", ref_text);
@@ -1737,10 +1943,12 @@ impl TTSInference {
             tts_bos_id,
             tts_eos_id,
             codec_think_id,
+            codec_nothink_id,
             codec_think_bos_id,
             codec_think_eos_id,
             codec_pad_id,
             codec_bos_id,
+            None,
         );
 
         // Pre-compute tts_pad embedding for trailing text during generation
@@ -1788,6 +1996,286 @@ impl TTSInference {
         Ok((waveform, sample_rate))
     }
 
+    /// Trace ICL voice cloning generation for Python MLX parity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn trace_with_icl(
+        &self,
+        trace: &mut TraceWriter,
+        text: &str,
+        ref_text: &str,
+        ref_codes: &[Vec<i64>],
+        speaker_embedding: &Tensor,
+        language: &str,
+        temperature: f64,
+        top_k: i64,
+        max_steps: i64,
+        trace_topk: usize,
+        forced_generated_codes: Option<&[Vec<i64>]>,
+    ) -> Result<()> {
+        trace.metadata(
+            "run/config",
+            json!({
+                "model": "rust-local",
+                "text": text,
+                "ref_text": ref_text,
+                "language": language,
+                "max_steps": max_steps,
+                "temperature": temperature,
+                "top_k": top_k,
+                "repetition_penalty": 1.5,
+            }),
+        )?;
+
+        let language_id = self
+            .config
+            .talker_config
+            .codec_language_id
+            .as_ref()
+            .and_then(|map| map.get(&language.to_lowercase()))
+            .copied()
+            .map(i64::from);
+        trace.metadata(
+            "prepare/language",
+            json!({ "language": language, "language_id": language_id }),
+        )?;
+
+        let codec_eos_id = self.config.talker_config.codec_eos_token_id as i64;
+        let codec_think_id = self.config.talker_config.codec_think_id as i64;
+        let codec_nothink_id = self.config.talker_config.codec_nothink_id as i64;
+        let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
+        let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
+        let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
+        let codec_bos_id = self.config.talker_config.codec_bos_id as i64;
+        let tts_pad_id = self.config.tts_pad_token_id as i64;
+        let tts_bos_id = self.config.tts_bos_token_id as i64;
+        let tts_eos_id = self.config.tts_eos_token_id as i64;
+
+        let im_start = self.config.im_start_token_id as i64;
+        let im_end = self.config.im_end_token_id as i64;
+        let assistant_id = self.config.assistant_token_id as i64;
+        let newline_tokens = self.tokenize("\n")?;
+        let newline_id = newline_tokens.first().copied().unwrap_or(198) as i64;
+
+        let ref_text_tokens = self.tokenize(ref_text)?;
+        let ref_text_ids = ref_text_tokens
+            .iter()
+            .map(|&id| id as i64)
+            .collect::<Vec<_>>();
+        let mut ref_token_ids = vec![im_start, assistant_id, newline_id];
+        ref_token_ids.extend_from_slice(&ref_text_ids);
+        ref_token_ids.extend_from_slice(&[im_end, newline_id]);
+        trace.ids("prepare/ref_chat_ids", &ref_token_ids)?;
+        trace.ids(
+            "prepare/ref_text_ids",
+            &ref_token_ids[3..ref_token_ids.len().saturating_sub(2)],
+        )?;
+
+        let synth_tokens = self.tokenize(text)?;
+        let synth_ids = synth_tokens.iter().map(|&id| id as i64).collect::<Vec<_>>();
+        let mut synth_token_ids = vec![im_start, assistant_id, newline_id];
+        synth_token_ids.extend_from_slice(&synth_ids);
+        synth_token_ids.extend_from_slice(&[
+            im_end,
+            newline_id,
+            im_start,
+            assistant_id,
+            newline_id,
+        ]);
+        trace.ids("prepare/target_chat_ids", &synth_token_ids)?;
+        trace.ids(
+            "prepare/target_text_ids",
+            &synth_token_ids[3..synth_token_ids.len().saturating_sub(5)],
+        )?;
+        trace.tensor("prepare/speaker_embed", speaker_embedding)?;
+
+        let ref_codes_flat = ref_codes
+            .iter()
+            .flat_map(|frame| frame.iter().copied())
+            .collect::<Vec<_>>();
+        trace.ids("prepare/ref_codes_flat_frame_major", &ref_codes_flat)?;
+
+        let input_embeddings = self.talker.build_input_embeddings_with_icl(
+            &ref_token_ids,
+            &synth_token_ids,
+            ref_codes,
+            speaker_embedding,
+            language_id,
+            tts_pad_id,
+            tts_bos_id,
+            tts_eos_id,
+            codec_think_id,
+            codec_nothink_id,
+            codec_think_bos_id,
+            codec_think_eos_id,
+            codec_pad_id,
+            codec_bos_id,
+            Some(trace),
+        );
+        trace.tensor("prepare/input_embeds", &input_embeddings)?;
+        let tts_embeds = self.talker.trace_text_projection(
+            "tts_text_projection",
+            &[tts_bos_id, tts_eos_id, tts_pad_id],
+            trace,
+        )?;
+        trace.tensor("prepare/tts_embeds", &tts_embeds)?;
+        let tts_pad_embed = tts_embeds.narrow(1, 2, 1);
+        trace.tensor("prepare/tts_pad_embed", &tts_pad_embed)?;
+
+        let effective_max_steps = max_steps.min((self.tokenize(text)?.len() as i64 * 6).max(75));
+        trace.metadata(
+            "generation/effective_max_steps",
+            json!({
+                "target_token_count": self.tokenize(text)?.len(),
+                "effective_max_steps": effective_max_steps,
+            }),
+        )?;
+
+        let repetition_penalty = 1.5;
+        let suppress_tokens = (self.config.talker_config.vocab_size as i64 - 1024
+            ..self.config.talker_config.vocab_size as i64)
+            .filter(|&id| id != codec_eos_id)
+            .collect::<Vec<_>>();
+        trace.ids("generation/suppress_tokens", &suppress_tokens)?;
+
+        let mut caches = (0..self.talker.layers.len())
+            .map(|_| KVCache::new())
+            .collect::<Vec<_>>();
+        let mut code_predictor_caches = (0..self.talker.code_predictor.layers.len())
+            .map(|_| KVCache::new())
+            .collect::<Vec<_>>();
+        let prefill_len = input_embeddings.size()[1];
+        let mask_zeros = Tensor::zeros(&[prefill_len, prefill_len], DType::Float32, self.device);
+        let upper = Tensor::ones(&[prefill_len, prefill_len], DType::Bool, self.device).triu(1);
+        let causal_mask = mask_zeros.masked_fill(&upper, f64::NEG_INFINITY).view(&[
+            1,
+            1,
+            prefill_len,
+            prefill_len,
+        ]);
+        let mut normed_hidden = self.talker.forward_embeds_with_cache_traced(
+            &input_embeddings,
+            Some(&causal_mask),
+            &mut caches,
+            trace,
+            0,
+        )?;
+        let mut generated_codes = Vec::new();
+        let mut generated_token_ids = Vec::new();
+
+        for step in 0..effective_max_steps {
+            trace.tensor(&format!("generation/step_{step:04}/hidden"), &normed_hidden)?;
+            let last_hidden = normed_hidden.select(1, normed_hidden.size()[1] - 1);
+            let logits = self.talker.codec_head.forward(&last_hidden);
+            trace.tensor(&format!("generation/step_{step:04}/logits"), &logits)?;
+            trace.topk(
+                &format!("generation/step_{step:04}/logits_topk"),
+                &logits,
+                trace_topk,
+            )?;
+            let sampled_code_0 = self.talker.predict_code_0(
+                &normed_hidden,
+                temperature,
+                top_k,
+                repetition_penalty,
+                &generated_token_ids,
+            );
+            let forced_frame = forced_generated_codes.and_then(|codes| codes.get(step as usize));
+            let code_0 = forced_frame
+                .and_then(|codes| codes.first().copied())
+                .unwrap_or(sampled_code_0);
+            trace.ids(&format!("generation/step_{step:04}/code_0"), &[code_0])?;
+            trace.ids(&format!("generation/step_{step:04}/code_0_ids"), &[code_0])?;
+            if code_0 == codec_eos_id {
+                trace.metadata(
+                    &format!("generation/step_{step:04}/eos"),
+                    json!({ "eos_token_id": codec_eos_id }),
+                )?;
+                break;
+            }
+
+            let seq_len = normed_hidden.size()[1];
+            let main_hidden = normed_hidden.select(1, seq_len - 1).unsqueeze(1);
+            trace.tensor(
+                &format!("generation/step_{step:04}/code_hidden"),
+                &main_hidden,
+            )?;
+            let code_0_tensor = Tensor::from_slice_i64(&[code_0]).to_device(self.device);
+            let code_0_embed = self
+                .talker
+                .codec_embedding
+                .index_select(0, &code_0_tensor)
+                .unsqueeze(0);
+
+            let predictor_codes = self.talker.code_predictor.generate_codes_inner(
+                &main_hidden,
+                &code_0_embed,
+                temperature,
+                top_k,
+                &mut code_predictor_caches,
+                Some((trace, step, trace_topk)),
+                forced_frame.and_then(|codes| codes.get(1..)),
+            )?;
+            for (index, code) in predictor_codes.iter().enumerate() {
+                trace.ids(
+                    &format!("generation/step_{step:04}/predictor_{index:02}_code"),
+                    &[*code],
+                )?;
+                trace.ids(
+                    &format!("generation/step_{step:04}/predictor_{index:02}_code_ids"),
+                    &[*code],
+                )?;
+            }
+
+            let mut frame_codes = vec![code_0];
+            frame_codes.extend_from_slice(&predictor_codes);
+            trace.ids(
+                &format!("generation/step_{step:04}/all_codes"),
+                &frame_codes,
+            )?;
+            trace.ids(
+                &format!("generation/step_{step:04}/all_code_ids"),
+                &frame_codes,
+            )?;
+            generated_codes.push(frame_codes);
+            generated_token_ids.push(code_0);
+
+            let mut code_embeds_sum = code_0_embed.shallow_clone();
+            for (i, &code) in predictor_codes.iter().enumerate() {
+                if i < self.talker.code_predictor.code_embeddings.len() {
+                    let code_tensor = Tensor::from_slice_i64(&[code]).to_device(self.device);
+                    let embed = self.talker.code_predictor.code_embeddings[i]
+                        .index_select(0, &code_tensor)
+                        .unsqueeze(0);
+                    code_embeds_sum = &code_embeds_sum + &embed;
+                }
+            }
+            let next_input = (&code_embeds_sum + &tts_pad_embed).to_dtype(DType::BFloat16);
+            trace.tensor(
+                &format!("generation/step_{step:04}/next_codec_embed"),
+                &code_embeds_sum.to_dtype(DType::BFloat16),
+            )?;
+            normed_hidden = self.talker.forward_embeds_with_cache_traced(
+                &next_input,
+                None,
+                &mut caches,
+                trace,
+                step + 1,
+            )?;
+            trace.tensor(
+                &format!("generation/step_{step:04}/next_input_embeds"),
+                &next_input,
+            )?;
+        }
+
+        trace.ids("generation/generated_code_0_ids", &generated_token_ids)?;
+        let generated_flat = generated_codes
+            .iter()
+            .flat_map(|frame| frame.iter().copied())
+            .collect::<Vec<_>>();
+        trace.ids("decode/gen_codes_flat_frame_major", &generated_flat)?;
+        Ok(())
+    }
+
     /// Generate ICL voice clone audio and emit decoded chunks during codec generation.
     #[allow(clippy::too_many_arguments)]
     pub fn generate_with_icl_streaming<F>(
@@ -1813,10 +2301,11 @@ impl TTSInference {
             .as_ref()
             .and_then(|map| map.get(&language.to_lowercase()))
             .copied()
-            .unwrap_or(0) as i64;
+            .map(i64::from);
 
         let codec_eos_id = self.config.talker_config.codec_eos_token_id as i64;
         let codec_think_id = self.config.talker_config.codec_think_id as i64;
+        let codec_nothink_id = self.config.talker_config.codec_nothink_id as i64;
         let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
         let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
         let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
@@ -1826,7 +2315,7 @@ impl TTSInference {
         let tts_eos_id = self.config.tts_eos_token_id as i64;
 
         println!(
-            "ICL voice clone: Language: {} (id={})",
+            "ICL voice clone: Language: {} (id={:?})",
             language, language_id
         );
         println!("  Reference text: \"{}\"", ref_text);
@@ -1873,10 +2362,12 @@ impl TTSInference {
             tts_bos_id,
             tts_eos_id,
             codec_think_id,
+            codec_nothink_id,
             codec_think_bos_id,
             codec_think_eos_id,
             codec_pad_id,
             codec_bos_id,
+            None,
         );
         let tts_pad_embed = self.talker.embed_text(&[tts_pad_id]);
 
@@ -1890,7 +2381,10 @@ impl TTSInference {
         let sample_rate = 24000u32;
         let mut generated = 0usize;
         let mut should_continue = true;
-        let mut vocoder_state = self.vocoder.as_ref().map(|vocoder| vocoder.streaming_state());
+        let mut vocoder_state = self
+            .vocoder
+            .as_ref()
+            .map(|vocoder| vocoder.streaming_state());
         self.talker.generate_codes_streaming(
             &input_embeddings,
             max_codes,
@@ -1904,7 +2398,10 @@ impl TTSInference {
                     return should_continue;
                 }
                 generated += code_chunk.len();
-                println!("Streaming decode {} generated code frames", code_chunk.len());
+                println!(
+                    "Streaming decode {} generated code frames",
+                    code_chunk.len()
+                );
                 let waveform = if let Some(state) = vocoder_state.as_mut() {
                     self.decode_codes_to_audio_streaming(code_chunk, state)
                 } else {

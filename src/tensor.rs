@@ -834,8 +834,7 @@ impl Tensor {
     }
 
     pub fn contiguous(&self) -> Self {
-        // MLX uses unified memory; contiguous is effectively a no-op.
-        self.clone()
+        Tensor::from_mlx(crate::backend::mlx::ops::contiguous(&self.inner))
     }
 
     pub fn tr(&self) -> Self {
@@ -1337,7 +1336,7 @@ impl Tensor {
         let f32_arr = self
             .inner
             .astype(crate::backend::mlx::ffi::mlx_dtype::MLX_FLOAT32);
-        f32_arr.to_vec_f32()
+        crate::backend::mlx::ops::contiguous(&f32_arr).to_vec_f32()
     }
 
     pub fn try_into_f64(&self) -> Result<f64, String> {

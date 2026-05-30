@@ -10,7 +10,9 @@
 //! Total: 1920x downsample → 12.5 Hz frame rate at 24kHz input
 
 use crate::error::{Qwen3TTSError, Result};
+use crate::layers::RotaryEmbedding;
 use crate::tensor::{DType, Device, Tensor};
+use crate::trace::TraceWriter;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -85,8 +87,13 @@ impl CausalConv1d {
             weight_shape[2]
         };
         let padding_total = kernel_size - self.stride;
-        if padding_total > 0 {
-            let padded = x.constant_pad_nd(&[padding_total, 0]);
+        let input_len = x.size()[2];
+        let nframes =
+            ((input_len + padding_total - kernel_size).max(0) as f64 / self.stride as f64) + 1.0;
+        let ideal_len = ((nframes.ceil() as i64) - 1) * self.stride + kernel_size - padding_total;
+        let extra_padding = (ideal_len - input_len).max(0);
+        if padding_total > 0 || extra_padding > 0 {
+            let padded = x.constant_pad_nd(&[padding_total, extra_padding]);
             padded.conv1d(
                 &self.weight,
                 Some(&self.bias),
@@ -191,6 +198,16 @@ struct EncoderTransformerLayer {
     // Config
     num_heads: i64,
     head_dim: i64,
+    rotary_emb: RotaryEmbedding,
+    device: Device,
+}
+
+fn gelu_approx(x: &Tensor) -> Tensor {
+    let x_sq = x * x;
+    let x_cubed = &x_sq * x;
+    let inner = x + &(x_cubed * 0.044715);
+    let scaled = &inner * 0.797_884_560_802_865_4;
+    (x * 0.5) * (scaled.tanh() + 1.0)
 }
 
 impl EncoderTransformerLayer {
@@ -244,14 +261,13 @@ impl EncoderTransformerLayer {
                 .to_device(device),
             num_heads,
             head_dim,
+            rotary_emb: RotaryEmbedding::new(head_dim, 8000, 10000.0, device),
+            device,
         })
     }
 
     fn layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor) -> Tensor {
-        let mean = x.mean_dim(&[-1i64], true);
-        let var = x.var_dim(&[-1i64], false, true);
-        let normalized = (x - &mean) / (var + 1e-5).sqrt();
-        &normalized * weight + bias
+        x.layer_norm(&[x.size()[x.dim() - 1]], Some(weight), Some(bias), 1e-5)
     }
 
     fn forward(&self, x: &Tensor) -> Tensor {
@@ -276,8 +292,15 @@ impl EncoderTransformerLayer {
             .view(&[batch, seq_len, self.num_heads, self.head_dim])
             .permute(&[0, 2, 1, 3]);
 
+        let (q, k) = self.rotary_emb.forward(&q, &k, seq_len);
         let scale = (self.head_dim as f64).sqrt();
         let attn_weights = q.matmul(&k.transpose(-2, -1)) / scale;
+        let mask_zeros = Tensor::zeros(&[seq_len, seq_len], DType::Float32, self.device);
+        let upper = Tensor::ones(&[seq_len, seq_len], DType::Bool, self.device).triu(1);
+        let causal_mask = mask_zeros
+            .masked_fill(&upper, f64::NEG_INFINITY)
+            .view(&[1, 1, seq_len, seq_len]);
+        let attn_weights = attn_weights + causal_mask;
         let attn_weights = attn_weights.softmax(-1);
         let attn_output = attn_weights
             .matmul(&v)
@@ -292,12 +315,63 @@ impl EncoderTransformerLayer {
         // Post-attention LayerNorm
         let normed2 = Self::layer_norm(&h, &self.post_ln_weight, &self.post_ln_bias);
 
-        // FFN: fc1 → GELU → fc2
-        let mlp_out = normed2.matmul(&self.fc1_weight.tr()).gelu();
+        // FFN: fc1 → GELU approximate → fc2
+        let mlp_out = gelu_approx(&normed2.matmul(&self.fc1_weight.tr()));
         let mlp_out = mlp_out.matmul(&self.fc2_weight.tr());
 
         // LayerScale + residual
         h + mlp_out * &self.mlp_layer_scale
+    }
+
+    fn forward_with_trace(&self, x: &Tensor, trace: &mut TraceWriter) -> Result<Tensor> {
+        let batch = x.size()[0];
+        let seq_len = x.size()[1];
+        let normed = Self::layer_norm(x, &self.input_ln_weight, &self.input_ln_bias);
+        trace.tensor("prepare/encoder_layer_00_norm1", &normed.transpose(1, 2))?;
+
+        let q = normed
+            .matmul(&self.q_proj.tr())
+            .view(&[batch, seq_len, self.num_heads, self.head_dim])
+            .permute(&[0, 2, 1, 3]);
+        let k = normed
+            .matmul(&self.k_proj.tr())
+            .view(&[batch, seq_len, self.num_heads, self.head_dim])
+            .permute(&[0, 2, 1, 3]);
+        let v = normed
+            .matmul(&self.v_proj.tr())
+            .view(&[batch, seq_len, self.num_heads, self.head_dim])
+            .permute(&[0, 2, 1, 3]);
+        let (q, k) = self.rotary_emb.forward(&q, &k, seq_len);
+        let scale = (self.head_dim as f64).sqrt();
+        let attn_weights = q.matmul(&k.transpose(-2, -1)) / scale;
+        let mask_zeros = Tensor::zeros(&[seq_len, seq_len], DType::Float32, self.device);
+        let upper = Tensor::ones(&[seq_len, seq_len], DType::Bool, self.device).triu(1);
+        let causal_mask = mask_zeros
+            .masked_fill(&upper, f64::NEG_INFINITY)
+            .view(&[1, 1, seq_len, seq_len]);
+        let attn_weights = (attn_weights + causal_mask).softmax(-1);
+        let attn_output = attn_weights
+            .matmul(&v)
+            .permute(&[0, 2, 1, 3])
+            .contiguous()
+            .view(&[batch, seq_len, -1]);
+        let attn_output = attn_output.matmul(&self.o_proj.tr());
+        trace.tensor(
+            "prepare/encoder_layer_00_attn",
+            &attn_output.transpose(1, 2),
+        )?;
+
+        let h = x + attn_output * &self.attn_layer_scale;
+        trace.tensor("prepare/encoder_layer_00_after_attn", &h.transpose(1, 2))?;
+        let normed2 = Self::layer_norm(&h, &self.post_ln_weight, &self.post_ln_bias);
+        trace.tensor("prepare/encoder_layer_00_norm2", &normed2.transpose(1, 2))?;
+        let mlp_fc1 = normed2.matmul(&self.fc1_weight.tr());
+        trace.tensor("prepare/encoder_layer_00_mlp_fc1", &mlp_fc1.transpose(1, 2))?;
+        let mlp_act = gelu_approx(&mlp_fc1);
+        trace.tensor("prepare/encoder_layer_00_mlp_act", &mlp_act.transpose(1, 2))?;
+        let mlp_out = mlp_act.matmul(&self.fc2_weight.tr());
+        trace.tensor("prepare/encoder_layer_00_mlp", &mlp_out.transpose(1, 2))?;
+        Ok(h + mlp_out * &self.mlp_layer_scale)
     }
 }
 
@@ -645,6 +719,23 @@ impl AudioEncoder {
     /// Input: f32 audio samples at 24kHz
     /// Output: Vec of frames, each frame is 16 codec codes (1 semantic + 15 acoustic)
     pub fn encode(&self, samples: &[f32]) -> Result<Vec<Vec<i64>>> {
+        self.encode_inner(samples, None)
+    }
+
+    /// Encode audio waveform and write parity trace checkpoints.
+    pub fn encode_with_trace(
+        &self,
+        samples: &[f32],
+        trace: &mut TraceWriter,
+    ) -> Result<Vec<Vec<i64>>> {
+        self.encode_inner(samples, Some(trace))
+    }
+
+    fn encode_inner(
+        &self,
+        samples: &[f32],
+        mut trace: Option<&mut TraceWriter>,
+    ) -> Result<Vec<Vec<i64>>> {
         let waveform = Tensor::from_slice_f32(samples)
             .to_device(self.device)
             .to_dtype(DType::Float32)
@@ -655,40 +746,108 @@ impl AudioEncoder {
 
         // Conv encoder
         let mut h = waveform;
-        for layer in &self.conv_layers {
+        for (layer_index, layer) in self.conv_layers.iter().enumerate() {
             h = match layer {
                 EncoderConvLayer::Conv(conv) => conv.forward(&h),
                 EncoderConvLayer::ResBlock(block) => block.forward(&h),
                 EncoderConvLayer::Elu => h.elu(),
             };
+            if let Some(trace) = trace.as_deref_mut() {
+                match layer_index {
+                    0 => {
+                        trace.tensor("prepare/encoder_conv_layer_00", &h)?;
+                        trace.tensor("prepare/encoder_conv_init", &h)?;
+                    }
+                    1 => trace.tensor("prepare/encoder_conv_layer_00_residual_00", &h)?,
+                    3 => trace.tensor("prepare/encoder_conv_layer_00_downsample", &h)?,
+                    4 => trace.tensor("prepare/encoder_conv_layer_01_residual_00", &h)?,
+                    6 => trace.tensor("prepare/encoder_conv_layer_01_downsample", &h)?,
+                    7 => trace.tensor("prepare/encoder_conv_layer_02_residual_00", &h)?,
+                    9 => trace.tensor("prepare/encoder_conv_layer_02_downsample", &h)?,
+                    10 => trace.tensor("prepare/encoder_conv_layer_03_residual_00", &h)?,
+                    12 => trace.tensor("prepare/encoder_conv_layer_03_downsample", &h)?,
+                    14 => trace.tensor("prepare/encoder_conv_final", &h)?,
+                    _ => {}
+                }
+            }
         }
         println!("  After conv encoder: {:?}", h.size());
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.tensor("prepare/encoder_after_conv", &h)?;
+        }
 
         // Transpose for transformer: [B, C, T] → [B, T, C]
         let mut h = h.transpose(1, 2);
         println!("  Before transformer: {:?}", h.size());
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.tensor("prepare/encoder_before_transformer", &h)?;
+        }
 
         // Transformer
-        for layer in &self.transformer_layers {
-            h = layer.forward(&h);
+        for (layer_index, layer) in self.transformer_layers.iter().enumerate() {
+            h = if layer_index == 0 {
+                if let Some(trace) = trace.as_deref_mut() {
+                    layer.forward_with_trace(&h, trace)?
+                } else {
+                    layer.forward(&h)
+                }
+            } else {
+                layer.forward(&h)
+            };
+            if let Some(trace) = trace.as_deref_mut() {
+                trace.tensor(
+                    &format!("prepare/encoder_transformer_layer_{layer_index:02}"),
+                    &h.transpose(1, 2),
+                )?;
+            }
         }
 
         // Back to conv format: [B, T, C] → [B, C, T]
         let h = h.transpose(1, 2);
         println!("  After transformer: {:?}", h.size());
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.tensor("prepare/encoder_after_transformer", &h)?;
+        }
 
-        // Downsample: Conv1d(512→512, k=4, stride=2) with causal padding
-        let pad = 4 - 2; // kernel_size - stride = 2
-        let h = h.constant_pad_nd(&[pad, 0]);
+        // Downsample: Conv1d(512→512, k=4, stride=2) with streamable causal padding.
+        let kernel_size = 4;
+        let stride = 2;
+        let pad = kernel_size - stride;
+        let input_len = h.size()[2];
+        let nframes = ((input_len + pad - kernel_size).max(0) as f64 / stride as f64) + 1.0;
+        let ideal_len = ((nframes.ceil() as i64) - 1) * stride + kernel_size - pad;
+        let extra_padding = (ideal_len - input_len).max(0);
+        let h = if pad > 0 || extra_padding > 0 {
+            let mut parts = Vec::new();
+            if pad > 0 {
+                parts.push(
+                    h.narrow(2, 0, 1)
+                        .expand(&[h.size()[0], h.size()[1], pad], false),
+                );
+            }
+            parts.push(h.shallow_clone());
+            if extra_padding > 0 {
+                parts.push(
+                    h.narrow(2, h.size()[2] - 1, 1)
+                        .expand(&[h.size()[0], h.size()[1], extra_padding], false),
+                );
+            }
+            Tensor::cat(&parts, 2)
+        } else {
+            h
+        };
         let h = h.conv1d(
             &self.downsample_weight,
             None::<&Tensor>,
-            &[2],
+            &[stride],
             &[0],
             &[1],
             1,
         );
         println!("  After downsample: {:?}", h.size());
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.tensor("prepare/encoder_after_downsample", &h)?;
+        }
 
         // Quantize
         // Semantic: 1 code per frame
@@ -699,6 +858,9 @@ impl AudioEncoder {
         // Concatenate: [1, 16, T]
         let all_codes = Tensor::cat(&[semantic_codes, acoustic_codes], 1);
         println!("  Encoded codes: {:?}", all_codes.size());
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.tensor("prepare/ref_codes", &all_codes)?;
+        }
 
         // Convert to Vec<Vec<i64>>: frames × 16
         let num_quantizers = all_codes.size()[1] as usize;

@@ -4,12 +4,13 @@
 //! ECAPA-TDNN speaker encoder for extracting speaker embeddings (x-vectors).
 //!
 //! Processes reference audio through mel-spectrogram extraction and an
-//! ECAPA-TDNN network to produce a 1024-dimensional speaker embedding
-//! used for voice cloning with the Base model.
+//! ECAPA-TDNN network to produce a speaker embedding used for voice cloning
+//! with the Base model.
 
 use crate::config::SpeakerEncoderConfig;
 use crate::error::{Qwen3TTSError, Result};
 use crate::tensor::{DType, Device, Tensor};
+use crate::trace::TraceWriter;
 use std::collections::HashMap;
 
 // Mel spectrogram parameters (from Qwen3 TTS Python reference)
@@ -198,7 +199,7 @@ impl Asp {
     fn forward(&self, x: &Tensor) -> Tensor {
         // x: [B, C, T]
         let mean = x.mean_dim(&[2i64], true); // [B, C, 1]
-        let std = x.std_dim(&[2i64], true, true); // [B, C, 1]
+        let std = (x.var_dim(&[2i64], false, true) + 1e-12).sqrt(); // [B, C, 1]
 
         // Expand mean and std to time dimension
         let t = x.size()[2];
@@ -209,14 +210,14 @@ impl Asp {
         let attn_input = Tensor::cat(&[x.shallow_clone(), mean_expanded, std_expanded], 1);
 
         // Attention network
-        let attn = self.tdnn.forward_no_pad(&attn_input).tanh();
+        let attn = self.tdnn.forward_no_pad(&attn_input).relu().tanh();
         let attn = self.conv.forward_no_pad(&attn).softmax(2); // [B, C, T]
 
         // Weighted statistics
         let weighted_mean = (x * &attn).sum_dim(&[2i64], false); // [B, C]
         let weighted_var =
             ((x - &weighted_mean.unsqueeze(2)).pow_scalar(2.0) * &attn).sum_dim(&[2i64], false); // [B, C]
-        let weighted_std = (weighted_var + 1e-6).sqrt();
+        let weighted_std = weighted_var.clamp_min(1e-12).sqrt();
 
         // Concatenate mean and std → [B, 2C]
         Tensor::cat(&[weighted_mean, weighted_std], 1)
@@ -225,7 +226,7 @@ impl Asp {
 
 /// ECAPA-TDNN speaker encoder.
 ///
-/// Extracts 1024-dimensional speaker embeddings (x-vectors) from audio.
+/// Extracts speaker embeddings (x-vectors) from audio.
 pub struct SpeakerEncoder {
     initial_conv: Conv1d,
     se_res2net_blocks: Vec<SERes2NetBlock>,
@@ -310,8 +311,25 @@ impl SpeakerEncoder {
     /// Extract speaker embedding from audio samples.
     ///
     /// Input: f32 audio samples at 24kHz.
-    /// Output: 1024-dim speaker embedding tensor (raw fc output, not normalized).
+    /// Output: speaker embedding tensor (raw fc output, not normalized).
     pub fn extract_embedding(&self, audio_samples: &[f32]) -> Result<Tensor> {
+        self.extract_embedding_inner(audio_samples, None)
+    }
+
+    /// Extract speaker embedding and write the mel input to the parity trace.
+    pub fn extract_embedding_with_trace(
+        &self,
+        audio_samples: &[f32],
+        trace: &mut TraceWriter,
+    ) -> Result<Tensor> {
+        self.extract_embedding_inner(audio_samples, Some(trace))
+    }
+
+    fn extract_embedding_inner(
+        &self,
+        audio_samples: &[f32],
+        mut trace: Option<&mut TraceWriter>,
+    ) -> Result<Tensor> {
         let waveform = Tensor::from_slice_f32(audio_samples)
             .to_device(self.device)
             .to_dtype(DType::Float32);
@@ -319,6 +337,11 @@ impl SpeakerEncoder {
         // Compute mel spectrogram
         let mel = self.compute_mel_spectrogram(&waveform)?;
         // mel shape: [n_mels, T]
+
+        // Python traces speaker mels as [B, T, n_mels].
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.tensor("prepare/speaker_mel", &mel.transpose(0, 1).unsqueeze(0))?;
+        }
 
         // Add batch dimension: [1, n_mels, T]
         let mel = mel.unsqueeze(0);
@@ -330,8 +353,8 @@ impl SpeakerEncoder {
     }
 
     fn compute_mel_spectrogram(&self, waveform: &Tensor) -> Result<Tensor> {
-        // Pad waveform for STFT (center padding with reflect mode, matching Python)
-        let pad = MEL_N_FFT / 2;
+        // Manual reflect padding matching Python: (n_fft - hop_size) / 2.
+        let pad = (MEL_N_FFT - MEL_HOP_SIZE) / 2;
         // reflection_pad1d requires 3D input [B, C, T]
         let waveform_3d = waveform.unsqueeze(0).unsqueeze(0);
         let padded_3d = waveform_3d.reflection_pad1d(&[pad, pad]);
@@ -348,8 +371,8 @@ impl SpeakerEncoder {
             true,  // return_complex
         );
 
-        // Magnitude spectrogram
-        let magnitude = stft.abs().pow_scalar(2.0); // [freq_bins, T]
+        // Magnitude spectrogram. Python uses sqrt(abs(spec)^2 + 1e-9), not power.
+        let magnitude = (stft.abs().pow_scalar(2.0) + 1e-9).sqrt(); // [freq_bins, T]
 
         // Apply mel filterbank: [n_mels, freq_bins] @ [freq_bins, T] → [n_mels, T]
         let mel_spec = self.mel_basis.matmul(&magnitude);
@@ -381,15 +404,14 @@ impl SpeakerEncoder {
         // Attentive Statistics Pooling → [B, 3072]
         let pooled = self.asp.forward(&mfa_out);
 
-        // Final FC: [B, 3072] → [B, 1024]
-        // fc weight is [1024, 3072, 1], so we need to add a time dim
+        // Final FC: [B, 2C] → [B, enc_dim]
+        // fc weight is [enc_dim, 2C, 1], so we need to add a time dim
         let pooled = pooled.unsqueeze(2); // [B, 3072, 1]
         let embedding = self.fc.forward_no_pad(&pooled).squeeze_dim(2); // [B, 1024]
 
-        // Return first (and only) batch element
         // No L2 normalization — the Python reference does not normalize,
         // and the model expects embeddings at the natural scale of the fc output.
-        embedding.squeeze_dim(0) // [1024]
+        embedding // [B, enc_dim]
     }
 }
 

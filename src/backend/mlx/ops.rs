@@ -43,6 +43,12 @@ pub fn negative(a: &MlxArray) -> MlxArray {
     res
 }
 
+pub fn contiguous(a: &MlxArray) -> MlxArray {
+    let mut res = MlxArray::empty();
+    unsafe { ffi::mlx_contiguous(&mut res.ptr, a.ptr, false, default_stream()) };
+    res
+}
+
 pub fn abs(a: &MlxArray) -> MlxArray {
     let mut res = MlxArray::empty();
     unsafe { ffi::mlx_abs(&mut res.ptr, a.ptr, default_stream()) };
@@ -80,6 +86,22 @@ pub fn clip(a: &MlxArray, min: &MlxArray, max: &MlxArray) -> MlxArray {
 pub fn matmul(a: &MlxArray, b: &MlxArray) -> MlxArray {
     let mut res = MlxArray::empty();
     unsafe { ffi::mlx_matmul(&mut res.ptr, a.ptr, b.ptr, default_stream()) };
+    res
+}
+
+pub fn addmm(c: &MlxArray, a: &MlxArray, b: &MlxArray) -> MlxArray {
+    let mut res = MlxArray::empty();
+    unsafe {
+        ffi::mlx_addmm(
+            &mut res.ptr,
+            c.ptr,
+            a.ptr,
+            b.ptr,
+            1.0,
+            1.0,
+            default_stream(),
+        )
+    };
     res
 }
 

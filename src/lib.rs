@@ -87,6 +87,7 @@ compile_error!("Either 'tch-backend' or 'mlx' feature must be enabled");
 #[cfg(feature = "mlx")]
 pub mod backend;
 pub mod tensor;
+pub mod trace;
 
 pub mod api;
 pub mod audio;

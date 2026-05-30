@@ -220,6 +220,12 @@ git submodule update --init --recursive
 cargo build --release --no-default-features --features mlx
 ```
 
+#### MLX 6-bit quantized matmul note
+
+The MLX backend builds MLX and MLX-C statically, but MLX loads `mlx.metallib` at runtime for Metal kernels. On local source builds of MLX `v0.31.2`, the generated `mlx.metallib` can produce incorrect results for Qwen3-TTS 6-bit long-sequence transposed quantized matmul inputs, e.g. `[1, seq, 2048]` with `seq > 16`. The Python MLX wheel's prebuilt `mlx.metallib` handles the same full 3D input correctly.
+
+The vendored MLX-C wrapper therefore chunks large 2D/3D transposed `mlx_quantized_matmul` calls into 16-token slices before calling MLX core. This keeps the real quantized Metal kernels, avoids dequantization, matches Python MLX numerically, and avoids the bad large-shape kernel artifact from local `mlx.metallib` builds.
+
 ### Linux (libtorch backend)
 
 **1. Download libtorch** from [libtorch-releases](https://github.com/second-state/libtorch-releases/releases/tag/v2.7.1):

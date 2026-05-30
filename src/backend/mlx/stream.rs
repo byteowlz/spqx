@@ -55,9 +55,13 @@ pub fn init_mlx(use_gpu: bool) {
 
         let device = unsafe { ffi::mlx_device_new_type(device_type, 0) };
         unsafe { ffi::mlx_set_default_device(device) };
-
-        let stream = unsafe { ffi::mlx_stream_new_device(device) };
         unsafe { ffi::mlx_device_free(device) };
+
+        let stream = match device_type {
+            ffi::mlx_device_type::MLX_GPU => unsafe { ffi::mlx_default_gpu_stream_new() },
+            ffi::mlx_device_type::MLX_CPU => unsafe { ffi::mlx_default_cpu_stream_new() },
+        };
+        unsafe { ffi::mlx_set_default_stream(stream) };
 
         MlxStream { ptr: stream }
     });
