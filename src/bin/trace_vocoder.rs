@@ -4,6 +4,7 @@
 //! Trace the Rust/MLX Qwen3-TTS vocoder for GGUF parity checks.
 
 use clap::Parser;
+use qwen3_tts_rs::audio::write_wav_file;
 use qwen3_tts_rs::tensor::{Device, Tensor};
 use qwen3_tts_rs::trace::TraceWriter;
 use qwen3_tts_rs::vocoder::{load_vocoder_weights, Vocoder, VocoderConfig};
@@ -33,6 +34,10 @@ struct Args {
     #[arg(long)]
     waveform_out: Option<PathBuf>,
 
+    /// Optional 24 kHz PCM WAV output.
+    #[arg(long)]
+    wav_out: Option<PathBuf>,
+
     /// Number of first/last tensor values to record.
     #[arg(long, default_value_t = 8)]
     sample_count: usize,
@@ -48,8 +53,8 @@ fn main() -> anyhow::Result<()> {
     if args.codes_json.is_none() == args.frame_codes_json.is_none() {
         anyhow::bail!("exactly one of --codes-json or --frame-codes-json is required");
     }
-    if args.trace_dir.is_none() && args.waveform_out.is_none() {
-        anyhow::bail!("at least one of --trace-dir or --waveform-out is required");
+    if args.trace_dir.is_none() && args.waveform_out.is_none() && args.wav_out.is_none() {
+        anyhow::bail!("at least one of --trace-dir, --waveform-out, or --wav-out is required");
     }
 
     let model_path = args.model_path.expanduser();
@@ -78,8 +83,16 @@ fn main() -> anyhow::Result<()> {
         vocoder.decode(&codes)
     };
 
+    let waveform_values = waveform.contiguous().to_vec_f32();
     if let Some(path) = args.waveform_out.as_ref() {
-        write_waveform_json(&path.expanduser(), &waveform.contiguous().to_vec_f32())?;
+        write_waveform_json(&path.expanduser(), &waveform_values)?;
+    }
+    if let Some(path) = args.wav_out.as_ref() {
+        let path = path.expanduser();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        write_wav_file(path_str(&path)?, &waveform_values, 24_000)?;
     }
 
     Ok(())
@@ -124,6 +137,11 @@ fn load_frame_major_codes(path: &Path) -> anyhow::Result<Tensor> {
         }
     }
     Ok(Tensor::from_slice_i64(&flat).view(&[1, 16, frames.len() as i64]))
+}
+
+fn path_str(path: &Path) -> anyhow::Result<&str> {
+    path.to_str()
+        .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {}", path.display()))
 }
 
 fn write_waveform_json(path: &Path, values: &[f32]) -> anyhow::Result<()> {
