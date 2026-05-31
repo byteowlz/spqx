@@ -78,5 +78,9 @@ path = "src/bin/api_server.rs"
 name = "pibot-tts-worker"
 path = "src/bin/worker.rs"
 
+[[bin]]
+name = "trace_vocoder"
+path = "src/bin/trace_vocoder.rs"
+
 [dev-dependencies]
 tempfile = "3.14"
