@@ -83,6 +83,10 @@ struct Args {
     /// Optional Python-generated generated_codes.json for teacher-forced parity traces.
     #[arg(long)]
     forced_codes_json: Option<PathBuf>,
+
+    /// Optional path for dumping full speaker embedding values as JSON.
+    #[arg(long)]
+    dump_speaker_embed_json: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -129,6 +133,14 @@ fn main() -> anyhow::Result<()> {
 
     let mut trace = TraceWriter::create(args.trace_dir.expanduser(), args.sample_count)?;
     let speaker_embedding = speaker_encoder.extract_embedding_with_trace(&samples, &mut trace)?;
+    if let Some(path) = args.dump_speaker_embed_json.as_ref() {
+        let path = path.expanduser();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let values = speaker_embedding.contiguous().to_vec_f32();
+        std::fs::write(path, serde_json::to_vec(&values)?)?;
+    }
     let ref_codes = if let Some(path) = args.ref_codes_json.as_ref() {
         let values: Vec<Vec<Vec<i64>>> =
             serde_json::from_str(&std::fs::read_to_string(path.expanduser())?)?;
