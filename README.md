@@ -1,370 +1,160 @@
-# Qwen3 TTS - Rust CLI tools
+# qwen3-tts-rs
 
-[![Crates.io](https://img.shields.io/crates/v/qwen3-tts-rs.svg)](https://crates.io/crates/qwen3-tts-rs)
-[![License](https://img.shields.io/crates/l/qwen3-tts-rs.svg)](https://github.com/second-state/qwen3_tts_rs/blob/main/LICENSE)
+Rust Qwen3-TTS inference with an Apple Silicon MLX backend. This fork is maintained for Pipi's native TTS worker and for Rust/Python MLX parity work.
 
-A Rust implementation of the Qwen3 Text-to-Speech (TTS) model inference. Provides three cross-platform CLI tools suitable for agentic skills for AI agents and bots.
+## What this fork contains
 
-- **tts** — generate speech from text with named speaker voices
-- **voice_clone** — clone a voice from reference audio
-- **api_server** — OpenAI-compatible HTTP API server
+- `pibot-tts-worker`: persistent binary-framed TTS worker used by Pipi.
+- `tts`: one-shot text-to-speech CLI.
+- `voice_clone`: one-shot voice-cloning CLI.
+- `api_server`: OpenAI-compatible HTTP speech API.
+- `trace_rust`: Rust trace generator for MLX parity debugging.
+- Python trace/compare tools in `scripts/`.
 
-Supports two backends: **libtorch** (via the `tch` crate, cross-platform with optional CUDA) and **MLX** (Apple Silicon native via Metal GPU).
+The important path for Pipi is the MLX backend plus `pibot-tts-worker`.
 
-Learn more:
-* [A Rust implementation / CLI](https://github.com/second-state/qwen3_asr_rs) for Qwen3's ASR (Automatic Speech Recognition or Speech-to-Text) models
-* An OpenAI compatible [API server for audio / speech](https://github.com/second-state/qwen3_audio_api/tree/main/rust)
-* An OpenClaw SKILL for voice generation. Copy and Paste to your lobster to [install it](https://raw.githubusercontent.com/second-state/qwen3_tts_rs/refs/heads/main/skills/install.md)
+## Requirements
 
-## Quick Start
-
-Install binaries, models, and reference audio for your platform:
-
-```bash
-curl -sSf https://raw.githubusercontent.com/second-state/qwen3_tts_rs/main/install.sh | bash
-cd qwen3_tts_rs
-```
-
-The installer detects your OS, CPU, and NVIDIA GPU (if present), then sets up everything in `./qwen3_tts_rs/`.
-
-### Text-to-Speech
-
-Generate speech with a named speaker using the CustomVoice model:
+- Apple Silicon Mac.
+- Rust toolchain.
+- Xcode command line tools and Metal toolchain.
+- CMake, pkg-config, and Opus.
 
 ```bash
-./tts models/Qwen3-TTS-12Hz-0.6B-CustomVoice "Hello world, this is a test." Vivian english
-# Output: output.wav (24 kHz)
+brew install cmake pkg-config opus
+xcodebuild -downloadComponent MetalToolchain
 ```
 
-### Voice Cloning
+## Build
 
-Clone a voice from reference audio using the Base model (ICL mode):
+From this repository:
 
 ```bash
-./voice_clone models/Qwen3-TTS-12Hz-0.6B-Base reference_audio/trump.wav \
-  "Hello, this is a voice cloning test." english \
-  "Angered and appalled millions of Americans across the political spectrum"
-# Output: output_voice_clone.wav (24 kHz)
-```
-
-### API Server
-
-Start the OpenAI-compatible API server with the CustomVoice model:
-
-```bash
-./api_server models/Qwen3-TTS-12Hz-0.6B-CustomVoice --port 8080
-```
-
-Then call the endpoint:
-
-```bash
-curl -X POST http://localhost:8080/v1/audio/speech \
-  -H "Content-Type: application/json" \
-  -d '{"input": "Hello world!", "voice": "alloy"}' \
-  -o output.wav
-```
-
-## Reference
-
-### `tts` — Text-to-Speech
-
-```
-tts <model_path> [text] [speaker] [language] [instruction]
-```
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `model_path` | (required) | Path to model directory |
-| `text` | "Hello! This is a test..." | Text to synthesize (max ~4096 chars) |
-| `speaker` | Vivian | Speaker name (see below) |
-| `language` | english | Language: `english`, `chinese`, `japanese`, `korean` |
-| `instruction` | (empty) | Voice style instruction (1.7B models only) |
-
-Output: `output.wav` (24 kHz, 16-bit PCM)
-
-**Available speakers** (CustomVoice models): Vivian, Serena, Ryan, Aiden, Uncle_fu, Ono_anna, Sohee, Eric, Dylan
-
-**Instruction examples** (1.7B CustomVoice only):
-- `"Speak in an urgent and excited voice"`
-- `"Speak happily and joyfully"`
-- `"Speak slowly and calmly"`
-- `"Speak in a whisper"`
-
-### `voice_clone` — Voice Cloning
-
-```
-voice_clone <model_path> <ref_audio> [text] [language] [ref_text]
-```
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `model_path` | (required) | Path to model directory |
-| `ref_audio` | (required) | Path to reference WAV file |
-| `text` | "Hello! This is a test..." | Text to synthesize |
-| `language` | english | Language |
-| `ref_text` | (none) | Transcript of reference audio (enables ICL mode, higher quality) |
-
-Output: `output_voice_clone.wav` (24 kHz, 16-bit PCM)
-
-**Preparing reference audio:** Must be mono 24 kHz 16-bit WAV. Convert with ffmpeg:
-
-```bash
-ffmpeg -i input.m4a -ac 1 -ar 24000 -sample_fmt s16 reference.wav
-```
-
-**Example:**
-
-```bash
-./voice_clone models/Qwen3-TTS-12Hz-0.6B-Base reference_audio/trump.wav \
-  "Hello, this is a voice cloning test." english \
-  "Angered and appalled millions of Americans across the political spectrum"
-```
-
-### `api_server` — OpenAI-Compatible API
-
-```
-api_server <model_path> [--host 127.0.0.1] [--port 8080]
-```
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `model_path` | (required) | Path to model directory |
-| `--host` | 127.0.0.1 | Bind address |
-| `--port` | 8080 | Listen port |
-
-**Endpoints:**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/v1/audio/speech` | Generate speech (OpenAI-compatible) |
-| GET | `/v1/models` | List available models |
-| GET | `/health` | Health check |
-
-### API Request: `POST /v1/audio/speech`
-
-```json
-{
-  "input": "Text to synthesize",
-  "voice": "alloy",
-  "model": "qwen3-tts",
-  "response_format": "wav",
-  "speed": 1.0,
-  "stream": false,
-  "language": "english",
-  "instructions": "Speak urgently",
-  "audio_sample": "<base64-encoded WAV>",
-  "audio_sample_text": "Transcript of the reference audio"
-}
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `input` | string | (required) | Text to synthesize (max 4096 chars) |
-| `voice` | string | `"alloy"` | OpenAI name or Qwen3 speaker name (see mapping below) |
-| `model` | string | — | Accepted for compatibility, ignored |
-| `response_format` | string | `"wav"` | `"wav"`, `"pcm"`, `"mp3"`, `"flac"`, `"ogg"`, or `"opus"` |
-| `speed` | float | 1.0 | Speed multiplier (0.25–4.0) |
-| `stream` | bool | false | Enable SSE streaming (requires `"pcm"`) |
-| `language` | string | `"english"` | `english`, `chinese`, `japanese`, `korean`, `auto` |
-| `instructions` | string | — | Voice style instruction (1.7B models only) |
-| `audio_sample` | string | — | Base64-encoded reference WAV for voice cloning |
-| `audio_sample_text` | string | — | Transcript of reference audio (required with `audio_sample`) |
-
-**Voice name mapping** (OpenAI → Qwen3):
-
-| OpenAI | Qwen3 |
-|--------|-------|
-| alloy | serena |
-| echo | ryan |
-| fable | vivian |
-| onyx | eric |
-| nova | ono_anna |
-| shimmer | sohee |
-
-You can also pass Qwen3 speaker names directly (e.g., `"voice": "vivian"`).
-
-**Streaming:** When `stream: true` and `response_format: "pcm"`, the server returns Server-Sent Events with base64-encoded PCM chunks:
-
-```
-data: {"type":"speech.audio.delta","delta":"<base64 PCM>"}
-data: {"type":"speech.audio.done"}
-```
-
-**Voice cloning via API:**
-
-```bash
-# Encode reference audio as base64
-REF_B64=$(base64 < reference.wav)
-
-curl -X POST http://localhost:8080/v1/audio/speech \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"input\": \"Hello from a cloned voice.\",
-    \"voice\": \"alloy\",
-    \"audio_sample\": \"$REF_B64\",
-    \"audio_sample_text\": \"Transcript of the reference audio\"
-  }" -o cloned.wav
-```
-
-## Build from Source
-
-### macOS (MLX backend)
-
-Requires Apple Silicon Mac, Xcode, and CMake.
-
-```bash
-brew install cmake
-git clone https://github.com/second-state/qwen3_tts_rs.git
-cd qwen3_tts_rs
 git submodule update --init --recursive
+cargo build --release --no-default-features --features mlx --bin pibot-tts-worker
+```
+
+Build all MLX binaries:
+
+```bash
 cargo build --release --no-default-features --features mlx
 ```
 
-#### MLX 6-bit quantized matmul note
-
-The MLX backend builds MLX and MLX-C statically, but MLX loads `mlx.metallib` at runtime for Metal kernels. On local source builds of MLX `v0.31.2`, the generated `mlx.metallib` can produce incorrect results for Qwen3-TTS 6-bit long-sequence transposed quantized matmul inputs, e.g. `[1, seq, 2048]` with `seq > 16`. The Python MLX wheel's prebuilt `mlx.metallib` handles the same full 3D input correctly.
-
-The vendored MLX-C wrapper therefore chunks large 2D/3D transposed `mlx_quantized_matmul` calls into 16-token slices before calling MLX core. This keeps the real quantized Metal kernels, avoids dequantization, matches Python MLX numerically, and avoids the bad large-shape kernel artifact from local `mlx.metallib` builds.
-
-### Linux (libtorch backend)
-
-**1. Download libtorch** from [libtorch-releases](https://github.com/second-state/libtorch-releases/releases/tag/v2.7.1):
+Pipi builds this submodule with:
 
 ```bash
-# Linux x86_64 (CPU)
-curl -LO https://github.com/second-state/libtorch-releases/releases/download/v2.7.1/libtorch-cxx11-abi-x86_64-2.7.1.tar.gz
-tar xzf libtorch-cxx11-abi-x86_64-2.7.1.tar.gz
-
-# Linux x86_64 (CUDA 12.6)
-curl -LO https://github.com/second-state/libtorch-releases/releases/download/v2.7.1/libtorch-cxx11-abi-x86_64-cuda12.6-2.7.1.tar.gz
-tar xzf libtorch-cxx11-abi-x86_64-cuda12.6-2.7.1.tar.gz
-
-# Linux ARM64 (CPU)
-curl -LO https://github.com/second-state/libtorch-releases/releases/download/v2.7.1/libtorch-cxx11-abi-aarch64-2.7.1.tar.gz
-tar xzf libtorch-cxx11-abi-aarch64-2.7.1.tar.gz
-
-# Linux ARM64 (CUDA 12.6 / Jetson)
-curl -LO https://github.com/second-state/libtorch-releases/releases/download/v2.7.1/libtorch-cxx11-abi-aarch64-cuda12.6-2.7.1.tar.gz
-tar xzf libtorch-cxx11-abi-aarch64-cuda12.6-2.7.1.tar.gz
+npm run build:tts-rust
 ```
 
-**2. Set environment and build:**
+from the Pipi repository root.
+
+## Models
+
+Pipi currently defaults to the 0.6B Base 6-bit MLX model:
+
+```text
+mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit
+```
+
+The 1.7B Base 6-bit MLX model is also supported and was used for parity/performance testing:
+
+```text
+mlx-community/Qwen3-TTS-12Hz-1.7B-Base-6bit
+```
+
+Dense BF16 Qwen/Qwen3-TTS models are still supported. Dense MLX linear weights and biases are intentionally cast to FP32 in this fork; this is required for good audio quality with the unquantized 0.6B model.
+
+## Pipi worker
+
+Example worker invocation:
 
 ```bash
-export LIBTORCH=$(pwd)/libtorch
-export LIBTORCH_BYPASS_VERSION_CHECK=1
-
-git clone https://github.com/second-state/qwen3_tts_rs.git
-cd qwen3_tts_rs
-cargo build --release
+target/release/pibot-tts-worker \
+  --serve \
+  --model-name /path/to/qwen3-tts-model \
+  --ref-audio /path/to/reference.wav \
+  --ref-text-file /path/to/reference.txt \
+  --language de \
+  --output-sample-rate 24000 \
+  --temperature 0.7 \
+  --top-k 30
 ```
 
-Alternatively, use pip-installed PyTorch instead of downloading libtorch:
+The worker uses a binary stdin/stdout protocol and logs status/events on stderr. It emits streamed PCM chunks for low-latency playback.
+
+Language names and short aliases are normalized by the worker, e.g. `de` maps to `german`. `auto` remains supported.
+
+## One-shot CLIs
+
+Text-to-speech with a preset/custom voice model:
 
 ```bash
-pip install torch==2.7.1
-export LIBTORCH_USE_PYTORCH=1
-export LD_LIBRARY_PATH=$(python3 -c "import torch; print(torch.__path__[0])")/lib:$LD_LIBRARY_PATH
+target/release/tts /path/to/Qwen3-TTS-12Hz-0.6B-CustomVoice \
+  "Hello world" Vivian english
 ```
 
-### Download models and generate tokenizer
-
-After building, download models and generate `tokenizer.json` for each:
+Voice cloning with a Base model:
 
 ```bash
-pip install huggingface_hub transformers
-
-huggingface-cli download Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice --local-dir models/Qwen3-TTS-12Hz-0.6B-CustomVoice
-
-python3 -c "
-from transformers import AutoTokenizer
-for model in ['Qwen3-TTS-12Hz-0.6B-CustomVoice', 'Qwen3-TTS-12Hz-0.6B-Base', 'Qwen3-TTS-12Hz-1.7B-CustomVoice']:
-    path = f'models/{model}'
-    try:
-        tok = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
-        tok.backend_tokenizer.save(f'{path}/tokenizer.json')
-        print(f'Saved {path}/tokenizer.json')
-    except Exception as e:
-        print(f'Skipped {model}: {e}')
-"
+target/release/voice_clone /path/to/Qwen3-TTS-12Hz-0.6B-Base \
+  reference.wav \
+  "Hello from a cloned voice." \
+  english \
+  "Transcript of the reference audio"
 ```
 
-Binaries are in `target/release/`: `tts`, `voice_clone`, `api_server`.
+Reference audio should be mono 24 kHz WAV.
 
-### Rust library usage
+## Python/Rust MLX parity tools
 
-Add to your `Cargo.toml`:
+Generate Python MLX traces:
 
-```toml
-[dependencies]
-qwen3-tts-rs = "0.2"
-# Or for MLX backend:
-# qwen3-tts-rs = { version = "0.2", default-features = false, features = ["mlx"] }
+```bash
+python3 scripts/trace_python_mlx.py \
+  --model /path/to/model \
+  --ref-audio /path/to/reference.wav \
+  --ref-text-file /path/to/reference.txt \
+  --text "Hallo" \
+  --language de \
+  --out /tmp/python-trace
 ```
 
-See the [API documentation on docs.rs](https://docs.rs/qwen3-tts-rs) for library usage examples.
+Generate Rust MLX traces:
 
-## Performance (Apple M4 Mac, MLX backend)
-
-Test sentences: ~15–20 words in English ("The quick brown fox..." / "Scientists have discovered...") and Chinese.
-**RTF** = Real-Time Factor (wall time / audio duration). Lower is better; < 1.0 means faster than real-time.
-
-### 0.6B CustomVoice
-
-#### CLI (`tts` / `voice_clone`)
-
-| Test | Speaker | Language | Audio | Wall Time | RTF |
-|------|---------|----------|-------|-----------|-----|
-| Preset voice | Vivian | English | 5.92s | 10.93s | 1.85x |
-| Preset voice | Ryan | English | 8.16s | 14.15s | 1.73x |
-| Preset voice | Vivian | Chinese | 6.64s | 11.26s | 1.70x |
-| Voice clone (ICL) | ref audio | English | 7.04s | 16.77s | 2.38x |
-
-#### API server (after warmup)
-
-| Test | Voice | Mode | Audio | Wall Time | RTF |
-|------|-------|------|-------|-----------|-----|
-| Non-streaming WAV | alloy (serena) | full | 6.40s | 9.90s | 1.55x |
-| Non-streaming WAV | echo (ryan) | full | 8.00s | 12.70s | 1.59x |
-| Streaming PCM | alloy (serena) | stream | ~6.4s | 10.22s | ~1.60x |
-| Voice clone WAV | alloy + ref | full | 9.04s | 20.11s | 2.22x |
-
-### 1.7B CustomVoice
-
-#### CLI (`tts`)
-
-| Test | Speaker | Language | Audio | Wall Time | RTF |
-|------|---------|----------|-------|-----------|-----|
-| Preset voice | Vivian | English | 6.24s | 18.92s | 3.03x |
-| Preset voice | Ryan | English | 8.64s | 27.50s | 3.18x |
-| Preset voice | Vivian | Chinese | 6.24s | 18.31s | 2.93x |
-| Preset + instruction | Vivian | English | 8.80s | 29.97s | 3.41x |
-
-#### API server (after warmup)
-
-| Test | Voice | Mode | Audio | Wall Time | RTF |
-|------|-------|------|-------|-----------|-----|
-| Non-streaming WAV | alloy (serena) | full | 5.52s | 15.14s | 2.74x |
-| Non-streaming WAV | echo (ryan) | full | 8.64s | 26.31s | 3.05x |
-| Streaming PCM | alloy (serena) | stream | 8.16s | 19.79s | 2.43x |
-
-### 0.6B vs 1.7B comparison
-
-| Metric | 0.6B avg RTF | 1.7B avg RTF | Slowdown |
-|--------|-------------|-------------|----------|
-| CLI preset voice | 1.76x | 3.05x | ~1.7x |
-| API non-streaming | 1.57x | 2.90x | ~1.8x |
-
-## Architecture
-
+```bash
+cargo run --release --no-default-features --features mlx --bin trace_rust -- \
+  --model /path/to/model \
+  --ref-audio /path/to/reference.wav \
+  --ref-text-file /path/to/reference.txt \
+  --text "Hallo" \
+  --language de \
+  --out /tmp/rust-trace
 ```
-Text → Tokenizer → Dual-stream Embeddings → TalkerModel (28-layer Transformer)
-                                                    ↓
-                                              codec_head → Code 0
-                                                    ↓
-                                        CodePredictor (5-layer Transformer) → Codes 1-15
-                                                    ↓
-                                              Vocoder → 24kHz Waveform
+
+Compare traces:
+
+```bash
+python3 scripts/compare_traces.py /tmp/python-trace /tmp/rust-trace
+```
+
+The trace tools support forced/reference code paths used to isolate talker/code-predictor parity from audio-encoder drift.
+
+## MLX qmatmul workaround
+
+MLX loads `mlx.metallib` at runtime for Metal kernels. With Xcode 26.5 / Metal compiler `metalfe-32023.883`, locally source-built MLX `v0.31.2` can produce incorrect results for large-M transposed 6-bit `quantized_matmul` / `qmm_splitk` calls. The official Python MLX wheel artifact does not show the same issue.
+
+The vendored MLX-C wrapper in this fork works around the bad local Metal artifact by chunking large 2D/3D transposed quantized matmul calls into 16-token slices before calling MLX core. This keeps MLX's real quantized Metal kernels, avoids dequantization, and restores parity with Python MLX for Qwen3-TTS.
+
+Standalone repro:
+
+```text
+https://github.com/badlogic/mlx-qmm-repro
+```
+
+Upstream issue:
+
+```text
+https://github.com/ml-explore/mlx/issues/3586
 ```
 
 ## License
@@ -373,4 +163,4 @@ Apache-2.0
 
 ## Credits
 
-Based on the original Python implementation by the Alibaba Qwen team.
+Based on the original Rust implementation from Second State and the Qwen3-TTS Python/MLX implementation from the Alibaba Qwen team.
