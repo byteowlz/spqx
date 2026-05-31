@@ -38,6 +38,10 @@ struct Args {
     #[arg(long)]
     wav_out: Option<PathBuf>,
 
+    /// Optional raw 24 kHz signed 16-bit little-endian PCM output.
+    #[arg(long)]
+    pcm_s16le_out: Option<PathBuf>,
+
     /// Number of first/last tensor values to record.
     #[arg(long, default_value_t = 8)]
     sample_count: usize,
@@ -53,8 +57,12 @@ fn main() -> anyhow::Result<()> {
     if args.codes_json.is_none() == args.frame_codes_json.is_none() {
         anyhow::bail!("exactly one of --codes-json or --frame-codes-json is required");
     }
-    if args.trace_dir.is_none() && args.waveform_out.is_none() && args.wav_out.is_none() {
-        anyhow::bail!("at least one of --trace-dir, --waveform-out, or --wav-out is required");
+    if args.trace_dir.is_none()
+        && args.waveform_out.is_none()
+        && args.wav_out.is_none()
+        && args.pcm_s16le_out.is_none()
+    {
+        anyhow::bail!("at least one of --trace-dir, --waveform-out, --wav-out, or --pcm-s16le-out is required");
     }
 
     let model_path = args.model_path.expanduser();
@@ -93,6 +101,9 @@ fn main() -> anyhow::Result<()> {
             std::fs::create_dir_all(parent)?;
         }
         write_wav_file(path_str(&path)?, &waveform_values, 24_000)?;
+    }
+    if let Some(path) = args.pcm_s16le_out.as_ref() {
+        write_pcm_s16le(&path.expanduser(), &waveform_values)?;
     }
 
     Ok(())
@@ -151,6 +162,18 @@ fn write_waveform_json(path: &Path, values: &[f32]) -> anyhow::Result<()> {
     let mut out = std::fs::File::create(path)?;
     serde_json::to_writer(&mut out, values)?;
     out.write_all(b"\n")?;
+    Ok(())
+}
+
+fn write_pcm_s16le(path: &Path, values: &[f32]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut out = std::fs::File::create(path)?;
+    for value in values {
+        let sample = (value.clamp(-1.0, 1.0) * 32767.0) as i16;
+        out.write_all(&sample.to_le_bytes())?;
+    }
     Ok(())
 }
 
