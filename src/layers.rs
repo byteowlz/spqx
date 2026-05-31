@@ -117,7 +117,7 @@ impl Linear {
         let weight = weights.get(&format!("{prefix}.weight"))?.to_device(device);
         let bias = weights
             .get(&format!("{prefix}.bias"))
-            .map(|tensor| tensor.to_device(device));
+            .map(|tensor| tensor.to_device(device).to_dtype(DType::Float32));
         #[cfg(feature = "mlx")]
         {
             let scales = weights
@@ -161,7 +161,7 @@ impl Linear {
                 };
             }
             Self {
-                weight,
+                weight: weight.to_dtype(DType::Float32),
                 bias,
                 quantization: None,
             }
