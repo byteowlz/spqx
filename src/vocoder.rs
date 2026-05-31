@@ -11,6 +11,7 @@ use crate::backend::mlx;
 use crate::error::{Qwen3TTSError, Result};
 use crate::layers::KVCache;
 use crate::tensor::{DType, Device, Tensor};
+use crate::trace::TraceWriter;
 use std::collections::HashMap;
 
 /// Configuration for the vocoder decoder.
@@ -1569,6 +1570,37 @@ impl Vocoder {
         hidden = self.final_snake.forward(&hidden);
         hidden = self.final_conv.forward(&hidden);
         hidden.clamp(-1.0, 1.0).squeeze_dim(1)
+    }
+
+    /// Decode audio codes to waveform while writing coarse vocoder parity traces.
+    pub fn decode_with_trace(&self, codes: &Tensor, trace: &mut TraceWriter) -> Result<Tensor> {
+        let hidden = self.quantizer.decode(codes);
+        trace.tensor("vocoder/quantizer/combined", &hidden)?;
+        let hidden = self.pre_conv.forward(&hidden);
+        trace.tensor("vocoder/pre_conv", &hidden)?;
+        let mut hidden = self.pre_transformer.forward(&hidden);
+        trace.tensor("vocoder/pre_transformer/output", &hidden)?;
+
+        for (index, (trans_conv, convnext)) in self.upsample_blocks.iter().enumerate() {
+            hidden = trans_conv.forward(&hidden);
+            trace.tensor(&format!("vocoder/upsample_{index:02}/trans_conv"), &hidden)?;
+            hidden = convnext.forward(&hidden);
+            trace.tensor(&format!("vocoder/upsample_{index:02}/convnext"), &hidden)?;
+        }
+
+        hidden = self.decoder_first_conv.forward(&hidden);
+        trace.tensor("vocoder/decoder/first_conv", &hidden)?;
+        for (index, block) in self.decoder_blocks.iter().enumerate() {
+            hidden = block.forward(&hidden);
+            trace.tensor(&format!("vocoder/decoder/block_{index:02}"), &hidden)?;
+        }
+
+        hidden = self.final_snake.forward(&hidden);
+        trace.tensor("vocoder/decoder/final_snake", &hidden)?;
+        hidden = self.final_conv.forward(&hidden);
+        let waveform = hidden.clamp(-1.0, 1.0).squeeze_dim(1);
+        trace.tensor("vocoder/waveform", &waveform)?;
+        Ok(waveform)
     }
 
     /// Incrementally decode only new code frames, matching MLX `decoder.streaming_step`.

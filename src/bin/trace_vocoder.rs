@@ -54,12 +54,12 @@ fn main() -> anyhow::Result<()> {
     )?;
     let vocoder = Vocoder::load(&weights, VocoderConfig::default(), Device::Cpu)?;
     let codes = load_codes(&args.codes_json.expanduser())?;
-    let waveform = vocoder.decode(&codes);
-
-    if let Some(trace_dir) = args.trace_dir.as_ref() {
+    let waveform = if let Some(trace_dir) = args.trace_dir.as_ref() {
         let mut trace = TraceWriter::create(trace_dir.expanduser(), args.sample_count)?;
-        trace.tensor("vocoder/waveform", &waveform)?;
-    }
+        vocoder.decode_with_trace(&codes, &mut trace)?
+    } else {
+        vocoder.decode(&codes)
+    };
 
     if let Some(path) = args.waveform_out.as_ref() {
         write_waveform_json(&path.expanduser(), &waveform.contiguous().to_vec_f32())?;
