@@ -46,7 +46,7 @@ extern "C" {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "worker", about = "Persistent Qwen3 TTS binary-framed worker")]
+#[command(name = "pibot-tts-worker", about = "Persistent Qwen3 TTS binary-framed worker")]
 struct Args {
     /// Run as a persistent binary-framed worker on stdin/stdout.
     #[arg(long)]

@@ -75,7 +75,7 @@ name = "api_server"
 path = "src/bin/api_server.rs"
 
 [[bin]]
-name = "worker"
+name = "pibot-tts-worker"
 path = "src/bin/worker.rs"
 
 [dev-dependencies]
