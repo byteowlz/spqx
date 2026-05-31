@@ -17,9 +17,13 @@ struct Args {
     #[arg(long, default_value = "~/models/qwen3-tts-12hz-0.6b-base")]
     model_path: PathBuf,
 
-    /// Codes JSON with shape [1, 16, frames].
+    /// Quantizer-major codes JSON with shape [1, 16, frames].
     #[arg(long)]
-    codes_json: PathBuf,
+    codes_json: Option<PathBuf>,
+
+    /// Frame-major codes JSON with shape [frames, 16].
+    #[arg(long)]
+    frame_codes_json: Option<PathBuf>,
 
     /// Optional trace output directory.
     #[arg(long)]
@@ -41,6 +45,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     let args = Args::parse();
+    if args.codes_json.is_none() == args.frame_codes_json.is_none() {
+        anyhow::bail!("exactly one of --codes-json or --frame-codes-json is required");
+    }
     if args.trace_dir.is_none() && args.waveform_out.is_none() {
         anyhow::bail!("at least one of --trace-dir or --waveform-out is required");
     }
@@ -53,7 +60,17 @@ fn main() -> anyhow::Result<()> {
         Device::Cpu,
     )?;
     let vocoder = Vocoder::load(&weights, VocoderConfig::default(), Device::Cpu)?;
-    let codes = load_codes(&args.codes_json.expanduser())?;
+    let codes = if let Some(path) = args.codes_json.as_ref() {
+        load_quantizer_major_codes(&path.expanduser())?
+    } else {
+        load_frame_major_codes(
+            &args
+                .frame_codes_json
+                .as_ref()
+                .expect("validated")
+                .expanduser(),
+        )?
+    };
     let waveform = if let Some(trace_dir) = args.trace_dir.as_ref() {
         let mut trace = TraceWriter::create(trace_dir.expanduser(), args.sample_count)?;
         vocoder.decode_with_trace(&codes, &mut trace)?
@@ -68,7 +85,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn load_codes(path: &Path) -> anyhow::Result<Tensor> {
+fn load_quantizer_major_codes(path: &Path) -> anyhow::Result<Tensor> {
     let values: Vec<Vec<Vec<i64>>> = serde_json::from_str(&std::fs::read_to_string(path)?)?;
     let batch = values.len();
     if batch != 1 {
@@ -90,6 +107,23 @@ fn load_codes(path: &Path) -> anyhow::Result<Tensor> {
         flat.extend(quantizer.iter().copied());
     }
     Ok(Tensor::from_slice_i64(&flat).view(&[1, quantizers as i64, frames as i64]))
+}
+
+fn load_frame_major_codes(path: &Path) -> anyhow::Result<Tensor> {
+    let frames: Vec<Vec<i64>> = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    if frames.is_empty() {
+        anyhow::bail!("frame-major codes JSON is empty");
+    }
+    let mut flat = Vec::with_capacity(frames.len() * 16);
+    for codebook in 0..16 {
+        for (frame_index, frame) in frames.iter().enumerate() {
+            if frame.len() != 16 {
+                anyhow::bail!("frame {frame_index} has {} codes, expected 16", frame.len());
+            }
+            flat.push(frame[codebook]);
+        }
+    }
+    Ok(Tensor::from_slice_i64(&flat).view(&[1, 16, frames.len() as i64]))
 }
 
 fn write_waveform_json(path: &Path, values: &[f32]) -> anyhow::Result<()> {
