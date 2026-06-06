@@ -18,6 +18,7 @@ use crate::vocoder::{load_vocoder_weights, Vocoder, VocoderConfig, VocoderStream
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use tokenizers::pre_tokenizers::byte_level::ByteLevel;
 use tokenizers::Tokenizer;
 
@@ -1173,6 +1174,33 @@ impl TalkerModel {
 }
 
 /// TTS Inference engine.
+/// Timed non-streaming TTS output.
+pub struct TimedTTSOutput {
+    /// Generated waveform samples.
+    pub waveform: Vec<f32>,
+    /// Output sample rate in Hz.
+    pub sample_rate: u32,
+    /// Number of generated codec frames.
+    pub code_frames: usize,
+    /// Phase timings.
+    pub timings: TimedTTSPhases,
+}
+
+/// Timings for a non-streaming TTS request.
+pub struct TimedTTSPhases {
+    /// Text tokenization and prompt ID construction.
+    pub tokenization: Duration,
+    /// Input embedding construction.
+    pub embeddings: Duration,
+    /// Autoregressive codec generation.
+    pub code_generation: Duration,
+    /// Vocoder decode.
+    pub vocoder_decode: Duration,
+    /// Total request time excluding reference audio preparation and model load.
+    pub total: Duration,
+}
+
+/// Qwen3-TTS inference engine.
 pub struct TTSInference {
     /// Text tokenizer
     tokenizer: Tokenizer,
@@ -1994,6 +2022,157 @@ impl TTSInference {
         );
 
         Ok((waveform, sample_rate))
+    }
+
+    /// Generate speech using ICL voice cloning and return phase timings.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_with_icl_timed(
+        &self,
+        text: &str,
+        ref_text: &str,
+        ref_codes: &[Vec<i64>],
+        speaker_embedding: &Tensor,
+        language: &str,
+        temperature: f64,
+        top_k: i64,
+        max_codes: i64,
+    ) -> Result<TimedTTSOutput> {
+        let total_start = Instant::now();
+        let tokenization_start = Instant::now();
+
+        let language_id = self
+            .config
+            .talker_config
+            .codec_language_id
+            .as_ref()
+            .and_then(|map| map.get(&language.to_lowercase()))
+            .copied()
+            .map(i64::from);
+
+        let codec_eos_id = self.config.talker_config.codec_eos_token_id as i64;
+        let codec_think_id = self.config.talker_config.codec_think_id as i64;
+        let codec_nothink_id = self.config.talker_config.codec_nothink_id as i64;
+        let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
+        let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
+        let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
+        let codec_bos_id = self.config.talker_config.codec_bos_id as i64;
+        let tts_pad_id = self.config.tts_pad_token_id as i64;
+        let tts_bos_id = self.config.tts_bos_token_id as i64;
+        let tts_eos_id = self.config.tts_eos_token_id as i64;
+
+        println!(
+            "ICL voice clone: Language: {} (id={:?})",
+            language, language_id
+        );
+        println!("  Reference text: \"{}\"", ref_text);
+        println!("  Synthesis text: \"{}\"", text);
+        println!("  Reference codec frames: {}", ref_codes.len());
+
+        let im_start = self.config.im_start_token_id as i64;
+        let im_end = self.config.im_end_token_id as i64;
+        let assistant_id = self.config.assistant_token_id as i64;
+
+        let newline_tokens = self.tokenize("\n")?;
+        let newline_id = newline_tokens.first().copied().unwrap_or(198) as i64;
+
+        let ref_text_tokens = self.tokenize(ref_text)?;
+        let ref_text_ids: Vec<i64> = ref_text_tokens.iter().map(|&id| id as i64).collect();
+        let mut ref_token_ids = vec![im_start, assistant_id, newline_id];
+        ref_token_ids.extend_from_slice(&ref_text_ids);
+        ref_token_ids.extend_from_slice(&[im_end, newline_id]);
+
+        let synth_tokens = self.tokenize(text)?;
+        let synth_ids: Vec<i64> = synth_tokens.iter().map(|&id| id as i64).collect();
+        let mut synth_token_ids = vec![im_start, assistant_id, newline_id];
+        synth_token_ids.extend_from_slice(&synth_ids);
+        synth_token_ids.extend_from_slice(&[
+            im_end,
+            newline_id,
+            im_start,
+            assistant_id,
+            newline_id,
+        ]);
+
+        let tokenization = tokenization_start.elapsed();
+
+        println!(
+            "  ref_text tokens: {}, synth_text tokens: {}",
+            ref_token_ids.len(),
+            synth_token_ids.len()
+        );
+
+        println!("Building ICL input embeddings...");
+        let embeddings_start = Instant::now();
+        let input_embeddings = self.talker.build_input_embeddings_with_icl(
+            &ref_token_ids,
+            &synth_token_ids,
+            ref_codes,
+            speaker_embedding,
+            language_id,
+            tts_pad_id,
+            tts_bos_id,
+            tts_eos_id,
+            codec_think_id,
+            codec_nothink_id,
+            codec_think_bos_id,
+            codec_think_eos_id,
+            codec_pad_id,
+            codec_bos_id,
+            None,
+        );
+        let tts_pad_embed = self.talker.embed_text(&[tts_pad_id]);
+        let embeddings = embeddings_start.elapsed();
+
+        println!(
+            "Generating audio codes (temp={}, top_k={}, max={})...",
+            temperature, top_k, max_codes
+        );
+        let code_generation_start = Instant::now();
+        let generated_codes = self.talker.generate_codes(
+            &input_embeddings,
+            max_codes,
+            temperature,
+            top_k,
+            codec_eos_id,
+            &tts_pad_embed,
+        );
+        let code_generation = code_generation_start.elapsed();
+        println!("Generated {} code frames", generated_codes.len());
+
+        let gen_len = generated_codes.len();
+        println!("Decoding {} generated code frames", gen_len);
+
+        let sample_rate = 24000u32;
+        let vocoder_decode_start = Instant::now();
+        let waveform = if gen_len == 0 {
+            println!("Warning: No codes generated, returning silence");
+            vec![0.0; sample_rate as usize * 2]
+        } else if let Some(waveform) = self.decode_codes_to_audio(&generated_codes) {
+            println!("Final output: {} samples", waveform.len());
+            waveform
+        } else {
+            vec![0.0; sample_rate as usize * 2]
+        };
+        let vocoder_decode = vocoder_decode_start.elapsed();
+
+        println!(
+            "Generated {} samples ({:.2} seconds)",
+            waveform.len(),
+            waveform.len() as f64 / sample_rate as f64
+        );
+
+        Ok(TimedTTSOutput {
+            waveform,
+            sample_rate,
+            code_frames: gen_len,
+            timings: TimedTTSPhases {
+                tokenization,
+                embeddings,
+                code_generation,
+                vocoder_decode,
+                total: total_start.elapsed(),
+            },
+        })
     }
 
     /// Trace ICL voice cloning generation for Python MLX parity.

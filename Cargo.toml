@@ -79,6 +79,10 @@ name = "pibot-tts-worker"
 path = "src/bin/worker.rs"
 
 [[bin]]
+name = "qwen3-tts"
+path = "src/bin/qwen3_tts_cli.rs"
+
+[[bin]]
 name = "trace_vocoder"
 path = "src/bin/trace_vocoder.rs"
 
