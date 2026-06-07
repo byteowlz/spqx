@@ -223,6 +223,83 @@ fn main() -> anyhow::Result<()> {
     println!("  Throughput:     {:.2}x realtime", throughput);
     println!("  Code frames:    {}", generation.code_frames);
     println!("  Ref seconds:    {:.2} s", reference.seconds);
+
+    let detail = &generation.timings.detailed_generation;
+    let frames = detail.n_frames.max(1) as f64;
+    println!();
+    println!(
+        "=== Detailed Generation Timing ({} frames) ===",
+        detail.n_frames
+    );
+    println!();
+    println!("  Prefill:");
+    println!(
+        "    Forward total:    {:8.1} ms",
+        duration_ms(detail.prefill_forward)
+    );
+    println!(
+        "      Compute:        {:8.1} ms",
+        duration_ms(detail.prefill_forward)
+    );
+    println!();
+    println!("  Talker forward_step (total / per-frame):");
+    println!(
+        "    Total:            {:8.1} ms   ({:.1} ms/frame)",
+        duration_ms(detail.talker_forward),
+        duration_ms(detail.talker_forward) / frames
+    );
+    println!(
+        "      Compute:        {:8.1} ms   ({:.1} ms/frame)",
+        duration_ms(detail.talker_forward),
+        duration_ms(detail.talker_forward) / frames
+    );
+    println!();
+    println!("  Code predictor (total / per-frame):");
+    println!("    Backend:          MLX");
+    println!(
+        "    Total:            {:8.1} ms   ({:.1} ms/frame)",
+        duration_ms(detail.code_pred),
+        duration_ms(detail.code_pred) / frames
+    );
+    println!(
+        "      Init/KV/embed:  {:8.1} ms   ({:.1} ms/frame)",
+        duration_ms(detail.code_pred_init),
+        duration_ms(detail.code_pred_init) / frames
+    );
+    println!(
+        "      Prefill (2tok): {:8.1} ms   ({:.1} ms/frame)",
+        duration_ms(detail.code_pred_prefill),
+        duration_ms(detail.code_pred_prefill) / frames
+    );
+    println!(
+        "      Steps (14):     {:8.1} ms   ({:.1} ms/frame)",
+        duration_ms(detail.code_pred_steps),
+        duration_ms(detail.code_pred_steps) / frames
+    );
+    println!();
+    println!(
+        "  Embed lookups:      {:8.1} ms   ({:.1} ms/frame)",
+        duration_ms(detail.embed_lookup),
+        duration_ms(detail.embed_lookup) / frames
+    );
+    let accounted =
+        detail.prefill_forward + detail.talker_forward + detail.code_pred + detail.embed_lookup;
+    println!(
+        "  Other/overhead:     {:8.1} ms",
+        duration_ms(detail.total_generate.saturating_sub(accounted))
+    );
+    println!("  ─────────────────────────────────────────");
+    println!(
+        "  Total generate:     {:8.1} ms",
+        duration_ms(detail.total_generate)
+    );
+    if detail.n_frames > 0 {
+        println!(
+            "  Throughput:         {:8.1} ms/frame ({:.1} frames/s)",
+            duration_ms(detail.total_generate) / detail.n_frames as f64,
+            1000.0 * detail.n_frames as f64 / duration_ms(detail.total_generate)
+        );
+    }
     println!();
     println!("Output saved to: {}", output_path.display());
 
@@ -244,6 +321,20 @@ fn main() -> anyhow::Result<()> {
             "throughput": round3(throughput),
             "codeFrames": generation.code_frames,
             "sampleRate": args.output_sample_rate,
+            "detail": {
+                "frames": detail.n_frames,
+                "prefillForwardMs": round3(duration_ms(detail.prefill_forward)),
+                "talkerForwardMs": round3(duration_ms(detail.talker_forward)),
+                "talkerForwardMsPerFrame": round3(duration_ms(detail.talker_forward) / frames),
+                "codePredictorMs": round3(duration_ms(detail.code_pred)),
+                "codePredictorMsPerFrame": round3(duration_ms(detail.code_pred) / frames),
+                "codePredictorInitMs": round3(duration_ms(detail.code_pred_init)),
+                "codePredictorPrefillMs": round3(duration_ms(detail.code_pred_prefill)),
+                "codePredictorStepsMs": round3(duration_ms(detail.code_pred_steps)),
+                "embedLookupMs": round3(duration_ms(detail.embed_lookup)),
+                "generateTotalMs": round3(duration_ms(detail.total_generate)),
+                "generateMsPerFrame": round3(duration_ms(detail.total_generate) / frames),
+            },
         })
     );
 
@@ -314,6 +405,10 @@ fn normalize_language(language: &str) -> String {
 
 fn millis(duration: Duration) -> u128 {
     duration.as_millis()
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
 }
 
 fn round3(value: f64) -> f64 {

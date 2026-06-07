@@ -196,6 +196,30 @@ impl CodePredictor {
             caches,
             None,
             None,
+            None,
+        )
+        .unwrap_or_default()
+    }
+
+    /// Generate codes 1-15 autoregressively and accumulate detailed timings.
+    pub fn generate_codes_timed(
+        &self,
+        main_hidden: &Tensor,
+        code_0_embedding: &Tensor,
+        temperature: f64,
+        top_k: i64,
+        caches: &mut [KVCache],
+        timings: &mut DetailedGenerationTimings,
+    ) -> Vec<i64> {
+        self.generate_codes_inner(
+            main_hidden,
+            code_0_embedding,
+            temperature,
+            top_k,
+            caches,
+            None,
+            None,
+            Some(timings),
         )
         .unwrap_or_default()
     }
@@ -209,7 +233,9 @@ impl CodePredictor {
         caches: &mut [KVCache],
         mut trace: Option<(&mut TraceWriter, i64, usize)>,
         forced_codes: Option<&[i64]>,
+        mut timings: Option<&mut DetailedGenerationTimings>,
     ) -> std::io::Result<Vec<i64>> {
+        let init_start = Instant::now();
         let mut codes = Vec::new();
         for cache in caches.iter_mut() {
             cache.clear();
@@ -221,8 +247,15 @@ impl CodePredictor {
             ],
             1,
         );
+        input.eval();
+        if let Some(timings) = timings.as_deref_mut() {
+            let elapsed = init_start.elapsed();
+            timings.code_pred += elapsed;
+            timings.code_pred_init += elapsed;
+        }
 
         for step in 0..self.lm_heads.len() {
+            let step_start = Instant::now();
             if let Some((trace, generation_step, _)) = trace.as_mut() {
                 trace.tensor(
                     &format!(
@@ -337,6 +370,16 @@ impl CodePredictor {
                 input = self.code_embeddings[step]
                     .index_select(0, &code_tensor)
                     .unsqueeze(0);
+            }
+            input.eval();
+            if let Some(timings) = timings.as_deref_mut() {
+                let elapsed = step_start.elapsed();
+                timings.code_pred += elapsed;
+                if step == 0 {
+                    timings.code_pred_prefill += elapsed;
+                } else {
+                    timings.code_pred_steps += elapsed;
+                }
             }
         }
 
@@ -1066,6 +1109,115 @@ impl TalkerModel {
         all_codes
     }
 
+    /// Generate all codes with detailed timing instrumentation.
+    pub fn generate_codes_timed(
+        &self,
+        input_embeddings: &Tensor,
+        max_codes: i64,
+        temperature: f64,
+        top_k: i64,
+        eos_code: i64,
+        tts_pad_embed: &Tensor,
+    ) -> (Vec<Vec<i64>>, DetailedGenerationTimings) {
+        let repetition_penalty = 1.05; // From generation_config.json
+        let total_start = Instant::now();
+        let mut timings = DetailedGenerationTimings::default();
+        let mut all_codes = Vec::new();
+        let mut past_code_0s: Vec<i64> = Vec::new();
+        let mut caches = (0..self.layers.len())
+            .map(|_| KVCache::new())
+            .collect::<Vec<_>>();
+        let mut code_predictor_caches = (0..self.code_predictor.layers.len())
+            .map(|_| KVCache::new())
+            .collect::<Vec<_>>();
+        let prefill_len = input_embeddings.size()[1];
+        let mask_zeros = Tensor::zeros(&[prefill_len, prefill_len], DType::Float32, self.device);
+        let upper = Tensor::ones(&[prefill_len, prefill_len], DType::Bool, self.device).triu(1);
+        let causal_mask = mask_zeros.masked_fill(&upper, f64::NEG_INFINITY).view(&[
+            1,
+            1,
+            prefill_len,
+            prefill_len,
+        ]);
+
+        let prefill_start = Instant::now();
+        let mut normed_hidden =
+            self.forward_embeds_with_cache(input_embeddings, Some(&causal_mask), &mut caches);
+        normed_hidden.eval();
+        timings.prefill_forward = prefill_start.elapsed();
+
+        for step in 0..max_codes {
+            let seq_len = normed_hidden.size()[1];
+            let code_0 = self.predict_code_0(
+                &normed_hidden,
+                temperature,
+                top_k,
+                repetition_penalty,
+                &past_code_0s,
+            );
+            past_code_0s.push(code_0);
+
+            if code_0 == eos_code {
+                println!("  EOS detected at step {}", step);
+                break;
+            }
+
+            let main_hidden = normed_hidden.select(1, seq_len - 1).unsqueeze(1);
+            let code_pred_init_start = Instant::now();
+            let code_0_tensor = Tensor::from_slice_i64(&[code_0]).to_device(self.device);
+            let code_0_embed = self
+                .codec_embedding
+                .index_select(0, &code_0_tensor)
+                .unsqueeze(0);
+            code_0_embed.eval();
+            let code_pred_init_elapsed = code_pred_init_start.elapsed();
+            timings.code_pred += code_pred_init_elapsed;
+            timings.code_pred_init += code_pred_init_elapsed;
+
+            let predictor_codes = self.code_predictor.generate_codes_timed(
+                &main_hidden,
+                &code_0_embed,
+                temperature,
+                top_k,
+                &mut code_predictor_caches,
+                &mut timings,
+            );
+
+            let mut frame_codes = vec![code_0];
+            frame_codes.extend_from_slice(&predictor_codes);
+            all_codes.push(frame_codes);
+
+            let embed_lookup_start = Instant::now();
+            let mut code_embeds_sum = code_0_embed.shallow_clone();
+            for (i, &code) in predictor_codes.iter().enumerate() {
+                if i < self.code_predictor.code_embeddings.len() {
+                    let code_tensor = Tensor::from_slice_i64(&[code]).to_device(self.device);
+                    let embed = self.code_predictor.code_embeddings[i]
+                        .index_select(0, &code_tensor)
+                        .unsqueeze(0);
+                    code_embeds_sum = &code_embeds_sum + &embed;
+                }
+            }
+
+            let next_input = (&code_embeds_sum + tts_pad_embed).to_dtype(DType::BFloat16);
+            next_input.eval();
+            timings.embed_lookup += embed_lookup_start.elapsed();
+
+            let talker_step_start = Instant::now();
+            normed_hidden = self.forward_embeds_with_cache(&next_input, None, &mut caches);
+            normed_hidden.eval();
+            timings.talker_forward += talker_step_start.elapsed();
+
+            if step % 10 == 0 {
+                println!("  Generated {} code frames", step + 1);
+            }
+        }
+
+        timings.n_frames = all_codes.len();
+        timings.total_generate = total_start.elapsed();
+        (all_codes, timings)
+    }
+
     /// Generate codes and call `on_chunk` every `chunk_size` generated frames.
     pub fn generate_codes_streaming<F>(
         &self,
@@ -1186,6 +1338,29 @@ pub struct TimedTTSOutput {
     pub timings: TimedTTSPhases,
 }
 
+/// Detailed autoregressive generation timings, matching the GGML timing breakdown.
+#[derive(Debug, Clone, Default)]
+pub struct DetailedGenerationTimings {
+    /// Total measured autoregressive generation time.
+    pub total_generate: Duration,
+    /// Prompt/prefix transformer forward pass.
+    pub prefill_forward: Duration,
+    /// Recurrent talker forward steps after each generated frame.
+    pub talker_forward: Duration,
+    /// Code predictor total for codebooks 1-15.
+    pub code_pred: Duration,
+    /// Code predictor init/cache/embed setup.
+    pub code_pred_init: Duration,
+    /// Code predictor first 2-token prefill step.
+    pub code_pred_prefill: Duration,
+    /// Code predictor remaining 14 autoregressive steps.
+    pub code_pred_steps: Duration,
+    /// Codebook embedding lookups used to build the next talker input.
+    pub embed_lookup: Duration,
+    /// Number of generated codec frames.
+    pub n_frames: usize,
+}
+
 /// Timings for a non-streaming TTS request.
 pub struct TimedTTSPhases {
     /// Text tokenization and prompt ID construction.
@@ -1198,6 +1373,8 @@ pub struct TimedTTSPhases {
     pub vocoder_decode: Duration,
     /// Total request time excluding reference audio preparation and model load.
     pub total: Duration,
+    /// Detailed autoregressive generation timings.
+    pub detailed_generation: DetailedGenerationTimings,
 }
 
 /// Qwen3-TTS inference engine.
@@ -2128,7 +2305,7 @@ impl TTSInference {
             temperature, top_k, max_codes
         );
         let code_generation_start = Instant::now();
-        let generated_codes = self.talker.generate_codes(
+        let (generated_codes, mut detailed_generation) = self.talker.generate_codes_timed(
             &input_embeddings,
             max_codes,
             temperature,
@@ -2137,6 +2314,7 @@ impl TTSInference {
             &tts_pad_embed,
         );
         let code_generation = code_generation_start.elapsed();
+        detailed_generation.total_generate = code_generation;
         println!("Generated {} code frames", generated_codes.len());
 
         let gen_len = generated_codes.len();
@@ -2171,6 +2349,7 @@ impl TTSInference {
                 code_generation,
                 vocoder_decode,
                 total: total_start.elapsed(),
+                detailed_generation,
             },
         })
     }
@@ -2393,6 +2572,7 @@ impl TTSInference {
                 &mut code_predictor_caches,
                 Some((trace, step, trace_topk)),
                 forced_frame.and_then(|codes| codes.get(1..)),
+                None,
             )?;
             for (index, code) in predictor_codes.iter().enumerate() {
                 trace.ids(

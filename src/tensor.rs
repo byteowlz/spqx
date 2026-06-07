@@ -610,6 +610,8 @@ impl Tensor {
         Tensor::from_tch(self.inner.shallow_clone())
     }
 
+    pub fn eval(&self) {}
+
     // -- Data extraction --
 
     pub fn int64_value(&self, indices: &[i64]) -> i64 {
@@ -1295,6 +1297,10 @@ impl Tensor {
 
     pub fn shallow_clone(&self) -> Self {
         self.clone()
+    }
+
+    pub fn eval(&self) {
+        self.inner.eval();
     }
 
     // -- Data extraction --
