@@ -182,6 +182,22 @@ impl CodePredictor {
         top_k: i64,
         caches: &mut [KVCache],
     ) -> Vec<i64> {
+        self.generate_codes_with_embed_sum(main_hidden, code_0_embedding, temperature, top_k, caches)
+            .0
+    }
+
+    /// Like generate_codes, but also returns the sum of the sampled codes'
+    /// predictor embeddings when the device-chained fast path ran, so the
+    /// caller can build the next talker input without re-embedding each code
+    /// from host values.
+    pub fn generate_codes_with_embed_sum(
+        &self,
+        main_hidden: &Tensor,
+        code_0_embedding: &Tensor,
+        temperature: f64,
+        top_k: i64,
+        caches: &mut [KVCache],
+    ) -> (Vec<i64>, Option<Tensor>) {
         self.generate_codes_inner(
             main_hidden,
             code_0_embedding,
@@ -215,6 +231,7 @@ impl CodePredictor {
             None,
             Some(timings),
         )
+        .map(|(codes, _)| codes)
         .unwrap_or_default()
     }
 
@@ -228,7 +245,14 @@ impl CodePredictor {
         mut trace: Option<(&mut TraceWriter, i64, usize)>,
         forced_codes: Option<&[i64]>,
         mut timings: Option<&mut DetailedGenerationTimings>,
-    ) -> std::io::Result<Vec<i64>> {
+    ) -> std::io::Result<(Vec<i64>, Option<Tensor>)> {
+        // Hot path: no tracing, no timings, no forced codes. Samples stay on
+        // device, embedding lookups chain off the sampled index tensor, and
+        // the frame's codes are read back with a single sync after the loop —
+        // instead of one forced GPU sync (int64_value + eval) per sub-code.
+        let fast_path = trace.is_none() && timings.is_none() && forced_codes.is_none();
+        let mut sampled_codes: Vec<Tensor> = Vec::new();
+        let mut chained_embed_sum: Option<Tensor> = None;
         let init_start = Instant::now();
         let mut codes = Vec::new();
         for cache in caches.iter_mut() {
@@ -338,6 +362,36 @@ impl CodePredictor {
                     *trace_topk,
                 )?;
             }
+            if fast_path {
+                let sampled = if temperature <= 0.0 {
+                    logits.argmax(-1, false).view(&[1])
+                } else {
+                    let logits = &logits / temperature;
+                    let logits = if top_k > 0 {
+                        let vocab_size = logits.size()[logits.dim() - 1];
+                        let k = top_k.min(vocab_size);
+                        let top_values = logits.topk_values(k, -1, true, true);
+                        let threshold = top_values.select(-1, k - 1);
+                        let mask = logits.lt_tensor(&threshold.unsqueeze(-1));
+                        logits.masked_fill(&mask, f64::NEG_INFINITY)
+                    } else {
+                        logits
+                    };
+                    logits.softmax(-1).multinomial(1, true).view(&[1])
+                };
+                if step < self.code_embeddings.len() {
+                    input = self.code_embeddings[step]
+                        .index_select(0, &sampled)
+                        .unsqueeze(0);
+                    chained_embed_sum = Some(match chained_embed_sum.take() {
+                        Some(sum) => &sum + &input,
+                        None => input.shallow_clone(),
+                    });
+                }
+                sampled_codes.push(sampled);
+                continue;
+            }
+
             let forced_code = forced_codes.and_then(|codes| codes.get(step)).copied();
             let code = if let Some(forced_code) = forced_code {
                 forced_code
@@ -377,7 +431,16 @@ impl CodePredictor {
             }
         }
 
-        Ok(codes)
+        if fast_path {
+            // One sync for the whole frame's sub-codes.
+            let stacked = Tensor::cat(&sampled_codes, 0);
+            stacked.eval();
+            for index in 0..sampled_codes.len() {
+                codes.push(stacked.int64_value(&[index as i64]));
+            }
+        }
+
+        Ok((codes, chained_embed_sum))
     }
 }
 
@@ -1178,30 +1241,41 @@ impl TalkerModel {
         past_codes: &[i64],
     ) -> i64 {
         let last_hidden = normed_hidden.select(1, normed_hidden.size()[1] - 1);
-        let mut logits = self.codec_head.forward(&last_hidden);
+        // Sample code 0 in f32. The legacy host-side repetition penalty
+        // re-uploaded logits as Float32, so code-0 sampling always ran in
+        // f32; in bf16 the EOS logit quantizes below the top-k threshold on
+        // longer generations and the model never terminates. The cast is a
+        // tiny on-device op, not a sync.
+        let mut logits = self
+            .codec_head
+            .forward(&last_hidden)
+            .to_dtype(DType::Float32);
 
-        // Apply repetition penalty to previously generated codes
+        // Apply repetition penalty to previously generated codes, on device.
+        // The penalty COMPOUNDS per occurrence (factor = p^count): codes
+        // repeated in a silence loop get exponentially suppressed, which is
+        // what breaks the loop — a single application is measurably too weak.
+        // min(s*f^-1, s*f) picks s/f for positive s and s*f for negative s,
+        // the divide-positive/multiply-negative rule; unseen codes have f = 1
+        // and pass through. The factor upload is asynchronous; the previous
+        // implementation downloaded the full logits (a forced GPU sync per
+        // frame) and re-uploaded them.
         if repetition_penalty != 1.0 && !past_codes.is_empty() {
-            let logits_data = logits.to_vec_f32();
             let vocab_size = logits.size()[logits.dim() - 1] as usize;
-            let mut modified = logits_data.clone();
-
+            let mut factor = vec![1f32; vocab_size];
             for &code in past_codes {
-                let idx = code as usize;
-                if idx < vocab_size {
-                    let score = modified[idx];
-                    // Penalize: divide positive logits, multiply negative logits
-                    modified[idx] = if score > 0.0 {
-                        score / repetition_penalty as f32
-                    } else {
-                        score * repetition_penalty as f32
-                    };
+                if (code as usize) < vocab_size {
+                    factor[code as usize] *= repetition_penalty as f32;
                 }
             }
-
-            logits = Tensor::from_slice_f32(&modified)
+            let inverse: Vec<f32> = factor.iter().map(|value| 1.0 / value).collect();
+            let factor = Tensor::from_slice_f32(&factor)
                 .reshape(&logits.size())
                 .to_device(self.device);
+            let inverse = Tensor::from_slice_f32(&inverse)
+                .reshape(&logits.size())
+                .to_device(self.device);
+            logits = (&logits * &inverse).minimum(&(&logits * &factor));
         }
 
         if temperature <= 0.0 {
@@ -1435,29 +1509,38 @@ impl TalkerModel {
                 .codec_embedding
                 .index_select(0, &code_0_tensor)
                 .unsqueeze(0);
-            let predictor_codes = self.code_predictor.generate_codes(
-                &main_hidden,
-                &code_0_embed,
-                temperature,
-                top_k,
-                &mut code_predictor_caches,
-            );
+            let (predictor_codes, chained_embed_sum) =
+                self.code_predictor.generate_codes_with_embed_sum(
+                    &main_hidden,
+                    &code_0_embed,
+                    temperature,
+                    top_k,
+                    &mut code_predictor_caches,
+                );
 
             let mut frame_codes = vec![code_0];
             frame_codes.extend_from_slice(&predictor_codes);
             all_codes.push(frame_codes.clone());
             pending_codes.push(frame_codes);
 
-            let mut code_embeds_sum = code_0_embed.shallow_clone();
-            for (i, &code) in predictor_codes.iter().enumerate() {
-                if i < self.code_predictor.code_embeddings.len() {
-                    let ct = Tensor::from_slice_i64(&[code]).to_device(self.device);
-                    let emb = self.code_predictor.code_embeddings[i]
-                        .index_select(0, &ct)
-                        .unsqueeze(0);
-                    code_embeds_sum = &code_embeds_sum + &emb;
+            // The fast path already accumulated the predictor embeddings on
+            // device while chaining; fall back to re-embedding from host
+            // values only when it didn't run.
+            let code_embeds_sum = if let Some(pred_embed_sum) = chained_embed_sum {
+                &code_0_embed + &pred_embed_sum
+            } else {
+                let mut sum = code_0_embed.shallow_clone();
+                for (i, &code) in predictor_codes.iter().enumerate() {
+                    if i < self.code_predictor.code_embeddings.len() {
+                        let ct = Tensor::from_slice_i64(&[code]).to_device(self.device);
+                        let emb = self.code_predictor.code_embeddings[i]
+                            .index_select(0, &ct)
+                            .unsqueeze(0);
+                        sum = &sum + &emb;
+                    }
                 }
-            }
+                sum
+            };
 
             let next_input = (&code_embeds_sum + tts_pad_embed).to_dtype(DType::BFloat16);
             normed_hidden = self.forward_embeds_with_cache(&next_input, None, &mut caches);
@@ -2721,7 +2804,7 @@ impl TTSInference {
                 .index_select(0, &code_0_tensor)
                 .unsqueeze(0);
 
-            let predictor_codes = self.talker.code_predictor.generate_codes_inner(
+            let (predictor_codes, _) = self.talker.code_predictor.generate_codes_inner(
                 &main_hidden,
                 &code_0_embed,
                 temperature,
@@ -3088,5 +3171,56 @@ mod tests {
     #[test]
     fn test_inference_placeholder() {
         assert!(true);
+    }
+}
+
+#[cfg(all(test, feature = "mlx"))]
+mod penalty_tests {
+    use crate::tensor::{DType, Device, Tensor};
+
+    #[test]
+    fn device_penalty_matches_host_reference() {
+        crate::backend::mlx::stream::init_mlx(true);
+        let device = Device::gpu();
+        let vocab = 8usize;
+        let logits_host: Vec<f32> = vec![2.0, -1.5, 0.5, -0.25, 3.0, 0.0, -4.0, 1.0];
+        let past_codes: Vec<i64> = vec![0, 1, 6, 7, 7];
+        let p = 1.05f64;
+
+        // Host reference (legacy implementation).
+        let mut expected = logits_host.clone();
+        for &code in &past_codes {
+            let idx = code as usize;
+            let s = expected[idx];
+            expected[idx] = if s > 0.0 { s / p as f32 } else { s * p as f32 };
+        }
+
+        // Device implementation (predict_code_0's math). The penalty must
+        // compound per occurrence — code 7 appears twice above.
+        let logits = Tensor::from_slice_f32(&logits_host)
+            .reshape(&[1, vocab as i64])
+            .to_device(device)
+            .to_dtype(DType::Float32);
+        let mut factor = vec![1f32; vocab];
+        for &code in &past_codes {
+            factor[code as usize] *= p as f32;
+        }
+        let inverse: Vec<f32> = factor.iter().map(|value| 1.0 / value).collect();
+        let factor = Tensor::from_slice_f32(&factor)
+            .reshape(&logits.size())
+            .to_device(device);
+        let inverse = Tensor::from_slice_f32(&inverse)
+            .reshape(&logits.size())
+            .to_device(device);
+        let result = (&logits * &inverse).minimum(&(&logits * &factor));
+        let got = result.to_vec_f32();
+
+        for (i, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-5,
+                "index {i}: device {g} vs host {e} (logit {})",
+                logits_host[i]
+            );
+        }
     }
 }

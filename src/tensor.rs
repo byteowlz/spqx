@@ -486,6 +486,10 @@ impl Tensor {
         Tensor::from_tch(self.inner.lt_tensor(&other.inner))
     }
 
+    pub fn minimum(&self, other: &Tensor) -> Self {
+        Tensor::from_tch(self.inner.minimum(&other.inner))
+    }
+
     pub fn logical_or(&self, other: &Tensor) -> Self {
         Tensor::from_tch(self.inner.logical_or(&other.inner))
     }
@@ -1120,6 +1124,10 @@ impl Tensor {
 
     pub fn lt_tensor(&self, other: &Tensor) -> Self {
         Tensor::from_mlx(crate::backend::mlx::ops::less(&self.inner, &other.inner))
+    }
+
+    pub fn minimum(&self, other: &Tensor) -> Self {
+        Tensor::from_mlx(crate::backend::mlx::ops::minimum(&self.inner, &other.inner))
     }
 
     pub fn logical_or(&self, other: &Tensor) -> Self {
