@@ -1,0 +1,22 @@
+[package]
+name = "spqx-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "spqx: fast local text-to-speech with voice cloning (CLI)"
+
+[[bin]]
+name = "spqx"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+clap_complete = "4.5"
+env_logger = "0.11"
+log = "0.4"
+schemars = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"

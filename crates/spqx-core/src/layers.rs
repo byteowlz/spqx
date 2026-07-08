@@ -1276,7 +1276,12 @@ pub fn conv1d(
 mod tests {
     use super::*;
 
+    // Exercises MLX tensor ops, which need a default stream bound to the
+    // running thread; MLX's stream is thread-local while the OnceLock init
+    // binds it to one thread, so this is unreliable in the shared harness.
+    // Run with `--ignored --test-threads=1`. See spqx test-harness follow-up.
     #[test]
+    #[ignore = "needs a dedicated MLX stream; run with --ignored --test-threads=1"]
     fn test_snake_activation() {
         let x = Tensor::from_slice_f32(&[0.0f32, 1.0, 2.0]);
         let alpha = Tensor::from_slice_f32(&[1.0f32, 1.0, 1.0]);
@@ -1292,7 +1297,11 @@ mod qmm_bench {
     use crate::tensor::{DType, Device, Tensor};
     use std::path::PathBuf;
 
+    // MLX's stream is thread-local; these diagnostics initialize it directly
+    // and must run alone, not in the shared harness pass. Run with:
+    // `cargo test -p spqx-core --features mlx -- --ignored --test-threads=1`
     #[test]
+    #[ignore = "needs a dedicated MLX stream; run with --ignored --test-threads=1"]
     fn prefill_qmm_speed() {
         crate::backend::mlx::stream::init_mlx(true);
         let device = Device::gpu();
@@ -1322,6 +1331,7 @@ mod qmm_bench {
     /// chunking workaround: the full-batch transposed qmm must numerically
     /// match a 16-row-chunked reference computed through the same kernel.
     #[test]
+    #[ignore = "needs a dedicated MLX stream; run with --ignored --test-threads=1"]
     fn qmm_full_batch_matches_chunked_reference() {
         crate::backend::mlx::stream::init_mlx(true);
         let device = Device::gpu();

@@ -7,11 +7,11 @@
 //! frame header: uint8 type, uint32 request_id, uint32 payload_len, little-endian.
 
 use clap::Parser;
-use qwen3_tts_rs::audio::{load_wav_file, resample, write_wav_file};
-use qwen3_tts_rs::audio_encoder::AudioEncoder;
-use qwen3_tts_rs::inference::{IclSession, TTSInference};
-use qwen3_tts_rs::speaker_encoder::SpeakerEncoder;
-use qwen3_tts_rs::tensor::{Device, Tensor};
+use spqx_core::audio::{load_wav_file, resample, write_wav_file};
+use spqx_core::audio_encoder::AudioEncoder;
+use spqx_core::inference::{IclSession, TTSInference};
+use spqx_core::speaker_encoder::SpeakerEncoder;
+use spqx_core::tensor::{Device, Tensor};
 use serde_json::json;
 use std::collections::HashSet;
 use std::fs::File;
@@ -222,7 +222,7 @@ impl Worker {
     fn load(args: &Args) -> anyhow::Result<Self> {
         #[cfg(feature = "mlx")]
         {
-            qwen3_tts_rs::backend::mlx::stream::init_mlx(true);
+            spqx_core::backend::mlx::stream::init_mlx(true);
             eprintln!("MLX backend initialized (Metal GPU)");
         }
 
@@ -835,7 +835,7 @@ fn gate_leading_nonspeech(samples: &mut [f32], sample_rate: u32) {
 fn clear_mlx_cache() {
     #[cfg(feature = "mlx")]
     unsafe {
-        qwen3_tts_rs::backend::mlx::ffi::mlx_clear_cache();
+        spqx_core::backend::mlx::ffi::mlx_clear_cache();
     }
 }
 

@@ -53,3 +53,5 @@
 {"id":"evt_wh4e1ywh","issue_id":"spqx-srtg.3","action":"dep_added","timestamp":"2026-07-08T19:21:02.983036Z","note":"spqx-srtg.1"}
 {"id":"evt_g7cbxh2v","issue_id":"spqx-srtg.4","action":"dep_added","timestamp":"2026-07-08T19:21:03.003156Z","note":"spqx-srtg.2"}
 {"id":"evt_c3ma0v40","issue_id":"spqx-srtg.4","action":"dep_added","timestamp":"2026-07-08T19:21:03.008621Z","note":"spqx-srtg.3"}
+{"id":"evt_dghb0rze","issue_id":"spqx-k8xv","action":"closed","timestamp":"2026-07-08T19:52:27.001538Z","note":"Landed in generate_with_icl_session_streaming (the worker path). Benchmark sanity: normal utterances unaffected (miller short 3.61s, long 16.21s audio)."}
+{"id":"evt_mwt2w4mh","issue_id":"spqx-0g56","action":"created","timestamp":"2026-07-08T20:23:40.318465Z"}

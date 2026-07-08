@@ -4,10 +4,10 @@
 //! Trace the Rust/MLX Qwen3-TTS vocoder for GGUF parity checks.
 
 use clap::Parser;
-use qwen3_tts_rs::audio::write_wav_file;
-use qwen3_tts_rs::tensor::{Device, Tensor};
-use qwen3_tts_rs::trace::TraceWriter;
-use qwen3_tts_rs::vocoder::{load_vocoder_weights, Vocoder, VocoderConfig};
+use spqx_core::audio::write_wav_file;
+use spqx_core::tensor::{Device, Tensor};
+use spqx_core::trace::TraceWriter;
+use spqx_core::vocoder::{load_vocoder_weights, Vocoder, VocoderConfig};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -50,7 +50,7 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     #[cfg(feature = "mlx")]
     {
-        qwen3_tts_rs::backend::mlx::stream::init_mlx(true);
+        spqx_core::backend::mlx::stream::init_mlx(true);
     }
 
     let args = Args::parse();

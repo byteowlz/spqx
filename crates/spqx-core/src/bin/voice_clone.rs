@@ -15,12 +15,12 @@
 //!     "Hello world, this is a voice cloning test." english \
 //!     "This is the transcript of the reference audio."
 
-use qwen3_tts_rs::api::chunking::chunk_text;
-use qwen3_tts_rs::audio::write_wav_file;
-use qwen3_tts_rs::audio_encoder::AudioEncoder;
-use qwen3_tts_rs::inference::TTSInference;
-use qwen3_tts_rs::speaker_encoder::SpeakerEncoder;
-use qwen3_tts_rs::tensor::Device;
+use spqx_core::api::chunking::chunk_text;
+use spqx_core::audio::write_wav_file;
+use spqx_core::audio_encoder::AudioEncoder;
+use spqx_core::inference::TTSInference;
+use spqx_core::speaker_encoder::SpeakerEncoder;
+use spqx_core::tensor::Device;
 use std::path::Path;
 
 fn main() -> anyhow::Result<()> {
@@ -68,7 +68,7 @@ fn main() -> anyhow::Result<()> {
     // Initialize MLX backend with GPU (Metal) when using the mlx feature
     #[cfg(feature = "mlx")]
     {
-        qwen3_tts_rs::backend::mlx::stream::init_mlx(true);
+        spqx_core::backend::mlx::stream::init_mlx(true);
         println!("MLX backend initialized (Metal GPU)");
     }
 
@@ -86,7 +86,7 @@ fn main() -> anyhow::Result<()> {
     // Step 3: Load reference audio
     println!();
     println!("Loading reference audio: {}", ref_audio_path);
-    let (ref_samples, ref_sr) = qwen3_tts_rs::audio::load_wav_file(ref_audio_path)?;
+    let (ref_samples, ref_sr) = spqx_core::audio::load_wav_file(ref_audio_path)?;
     println!(
         "  {} samples at {} Hz ({:.2}s)",
         ref_samples.len(),
@@ -100,7 +100,7 @@ fn main() -> anyhow::Result<()> {
             "  Resampling from {} Hz to {} Hz...",
             ref_sr, se_config.sample_rate
         );
-        qwen3_tts_rs::audio::resample(&ref_samples, ref_sr, se_config.sample_rate)?
+        spqx_core::audio::resample(&ref_samples, ref_sr, se_config.sample_rate)?
     } else {
         ref_samples
     };

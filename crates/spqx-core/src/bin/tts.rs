@@ -12,10 +12,10 @@
 //! Example (with instruction control, requires 1.7B model):
 //!   tts ./models/Qwen3-TTS-12Hz-1.7B-CustomVoice "This is urgent news!" Vivian english "Speak in an urgent and excited voice"
 
-use qwen3_tts_rs::api::chunking::chunk_text;
-use qwen3_tts_rs::audio::write_wav_file;
-use qwen3_tts_rs::inference::TTSInference;
-use qwen3_tts_rs::tensor::Device;
+use spqx_core::api::chunking::chunk_text;
+use spqx_core::audio::write_wav_file;
+use spqx_core::inference::TTSInference;
+use spqx_core::tensor::Device;
 use std::path::Path;
 
 fn main() -> anyhow::Result<()> {
@@ -56,7 +56,7 @@ fn main() -> anyhow::Result<()> {
     // Initialize MLX backend with GPU (Metal) when using the mlx feature
     #[cfg(feature = "mlx")]
     {
-        qwen3_tts_rs::backend::mlx::stream::init_mlx(true);
+        spqx_core::backend::mlx::stream::init_mlx(true);
         println!("MLX backend initialized (Metal GPU)");
     }
 

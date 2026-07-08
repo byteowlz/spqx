@@ -74,7 +74,7 @@ toolchain.
 
 ```bash
 git submodule update --init --recursive
-cargo build --release --no-default-features --features mlx --bin spqx-tts-worker
+cargo build --release -p spqx-core --no-default-features --features mlx --bin spqx-tts-worker
 ```
 
 ## Usage

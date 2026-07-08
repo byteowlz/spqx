@@ -4,12 +4,12 @@
 //! Generate a Rust-side parity trace for Qwen3-TTS ICL voice cloning.
 
 use clap::Parser;
-use qwen3_tts_rs::audio::{load_wav_file, resample};
-use qwen3_tts_rs::audio_encoder::AudioEncoder;
-use qwen3_tts_rs::inference::TTSInference;
-use qwen3_tts_rs::speaker_encoder::SpeakerEncoder;
-use qwen3_tts_rs::tensor::{Device, Tensor};
-use qwen3_tts_rs::trace::TraceWriter;
+use spqx_core::audio::{load_wav_file, resample};
+use spqx_core::audio_encoder::AudioEncoder;
+use spqx_core::inference::TTSInference;
+use spqx_core::speaker_encoder::SpeakerEncoder;
+use spqx_core::tensor::{Device, Tensor};
+use spqx_core::trace::TraceWriter;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
@@ -92,7 +92,7 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     #[cfg(feature = "mlx")]
     {
-        qwen3_tts_rs::backend::mlx::stream::init_mlx(true);
+        spqx_core::backend::mlx::stream::init_mlx(true);
     }
 
     let args = Args::parse();

@@ -24,7 +24,7 @@ fn build_mlx() {
         );
     }
 
-    let mlx_c_dir = std::path::PathBuf::from("mlx-c");
+    let mlx_c_dir = std::path::PathBuf::from("../../mlx-c");
     if !mlx_c_dir.join("CMakeLists.txt").exists() {
         panic!(
             "mlx-c submodule not found. Please run:\n\
@@ -102,7 +102,33 @@ fn build_mlx() {
     // Link C++ standard library
     println!("cargo:rustc-link-lib=c++");
 
+    // MLX's `__builtin_available(macOS 26, ...)` guard emits a call to
+    // `___isPlatformVersionAtLeast`, which lives in clang's compiler-rt
+    // builtins. Rust links with `-nodefaultlibs`, so we must add it
+    // explicitly or the final binary fails with an undefined symbol.
+    if let Some(dir) = clang_rt_dir() {
+        println!("cargo:rustc-link-search=native={dir}");
+        println!("cargo:rustc-link-lib=static=clang_rt.osx");
+    }
+
     // Rerun if mlx-c sources change
-    println!("cargo:rerun-if-changed=mlx-c/CMakeLists.txt");
-    println!("cargo:rerun-if-changed=mlx-c/mlx/c/");
+    println!("cargo:rerun-if-changed=../../mlx-c/CMakeLists.txt");
+    println!("cargo:rerun-if-changed=../../mlx-c/mlx/c/");
+}
+
+/// Directory holding `libclang_rt.osx.a` for the active clang toolchain.
+#[cfg(feature = "mlx")]
+fn clang_rt_dir() -> Option<String> {
+    let output = std::process::Command::new("clang")
+        .arg("-print-resource-dir")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let resource_dir = String::from_utf8(output.stdout).ok()?;
+    let dir = std::path::Path::new(resource_dir.trim()).join("lib/darwin");
+    dir.join("libclang_rt.osx.a")
+        .exists()
+        .then(|| dir.display().to_string())
 }
