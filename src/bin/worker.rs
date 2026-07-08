@@ -361,27 +361,17 @@ impl Worker {
                         "label": "voice_clone_rust"
                     }));
                     ttfa_logged = true;
-                    // Declick the first chunk. The model can emit a loud
-                    // broadband transient in its first frames (ICL prompt
-                    // boundary artifact — present in the python-mlx worker
-                    // too): clamp outliers against the chunk's own RMS, then
-                    // fade in. A clamped click is a faint tick; an unclamped
-                    // one is a full-scale pop.
+                    // Gate leading non-speech in the first chunk. The model
+                    // can emit an isolated click between the ICL prompt
+                    // boundary and actual speech onset (present in the
+                    // python-mlx worker too). Sustained speech shows as a run
+                    // of loud 5ms blocks; an isolated click does not. Zero
+                    // everything before the sustained onset — the click sits
+                    // in silence, so zeroing is seamless and speech itself is
+                    // never touched. Clamping instead of gating audibly
+                    // squashes soft speech onsets; do not reintroduce it.
                     let mut buffer = samples.to_vec();
-                    if !buffer.is_empty() {
-                        let rms = (buffer.iter().map(|s| s * s).sum::<f32>()
-                            / buffer.len() as f32)
-                            .sqrt();
-                        // Floor keeps legit loud speech onsets unclamped.
-                        let ceiling = (rms * 4.0).max(0.15);
-                        for sample in buffer.iter_mut() {
-                            *sample = sample.clamp(-ceiling, ceiling);
-                        }
-                    }
-                    let fade = (sample_rate as usize * 20 / 1000).min(buffer.len());
-                    for (i, sample) in buffer.iter_mut().take(fade).enumerate() {
-                        *sample *= i as f32 / fade as f32;
-                    }
+                    gate_leading_nonspeech(&mut buffer, sample_rate);
                     faded = buffer;
                     &faded
                 };
@@ -738,6 +728,66 @@ fn normalize_language(language: &str) -> String {
 
 fn log_json(value: serde_json::Value) {
     eprintln!("{}", value);
+}
+
+/// Zero everything before the sustained speech onset in `samples`, then apply
+/// a short fade-in from the onset. Sustained speech = a 5ms block above the
+/// level threshold followed by mostly-loud blocks over the next 40ms; an
+/// isolated click fails that test and gets zeroed along with the silence
+/// around it. If no onset is found (pure leading silence, or speech starts in
+/// a later chunk), isolated loud blocks are zeroed and the rest is left
+/// untouched.
+fn gate_leading_nonspeech(samples: &mut [f32], sample_rate: u32) {
+    const BLOCK_MS: usize = 5;
+    const LEVEL: f32 = 0.02;
+    let block = (sample_rate as usize * BLOCK_MS / 1000).max(1);
+    let peaks: Vec<f32> = samples
+        .chunks(block)
+        .map(|chunk| chunk.iter().fold(0f32, |acc, s| acc.max(s.abs())))
+        .collect();
+
+    // Sustained speech = a contiguous run of loud 5ms blocks lasting at
+    // least 15ms. A click — even one straddling two blocks — bursts for
+    // <=10ms and then drops back to silence, so it never forms such a run;
+    // the scan skips past it and it gets wiped with the leading silence.
+    let mut onset_search = 0usize;
+    let mut found_onset = None;
+    while onset_search < peaks.len() {
+        if peaks[onset_search] <= LEVEL {
+            onset_search += 1;
+            continue;
+        }
+        let run_end = (onset_search..peaks.len())
+            .find(|&j| peaks[j] <= LEVEL)
+            .unwrap_or(peaks.len());
+        if run_end - onset_search >= 3 || run_end == peaks.len() {
+            found_onset = Some(onset_search);
+            break;
+        }
+        onset_search = run_end;
+    }
+
+    if let Some(onset_block) = found_onset {
+        let onset = onset_block * block;
+        for sample in samples[..onset].iter_mut() {
+            *sample = 0.0;
+        }
+        let fade = (sample_rate as usize * 3 / 1000).min(samples.len() - onset);
+        for (i, sample) in samples[onset..onset + fade].iter_mut().enumerate() {
+            *sample *= i as f32 / fade.max(1) as f32;
+        }
+    } else {
+        // No sustained speech in this chunk: kill isolated clicks only.
+        for (index, peak) in peaks.iter().enumerate() {
+            if *peak > LEVEL * 2.0 {
+                let start = index * block;
+                let end = (start + block).min(samples.len());
+                for sample in samples[start..end].iter_mut() {
+                    *sample = 0.0;
+                }
+            }
+        }
+    }
 }
 
 fn clear_mlx_cache() {
