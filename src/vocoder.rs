@@ -742,12 +742,17 @@ impl VocoderAttention {
         };
 
         #[cfg(feature = "mlx")]
+        // The vocoder pre-transformer uses a sliding-window mask, which has no
+        // fused mask mode — keep the additive array mask.
         let attn_output = Tensor::from_mlx(mlx::ops::fast_scaled_dot_product_attention(
             q.as_mlx(),
             k.as_mlx(),
             v.as_mlx(),
             self.scaling as f32,
-            attention_mask.map(|mask| mask.as_mlx()),
+            match attention_mask {
+                Some(mask) => mlx::ops::SdpaMask::Array(mask.as_mlx()),
+                None => mlx::ops::SdpaMask::None,
+            },
         ));
         #[cfg(not(feature = "mlx"))]
         let attn_output = {

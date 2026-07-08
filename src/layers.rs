@@ -115,9 +115,13 @@ impl Linear {
         device: Device,
     ) -> Option<Self> {
         let weight = weights.get(&format!("{prefix}.weight"))?.to_device(device);
+        // Keep the bias in its stored dtype here; from_parts casts it to
+        // Float32 only for dense layers (the fp32-for-quality workaround).
+        // For quantized layers an fp32 bias would promote the activation
+        // stream — and with it the whole prefill forward — to Float32.
         let bias = weights
             .get(&format!("{prefix}.bias"))
-            .map(|tensor| tensor.to_device(device).to_dtype(DType::Float32));
+            .map(|tensor| tensor.to_device(device));
         #[cfg(feature = "mlx")]
         {
             let scales = weights
@@ -162,7 +166,7 @@ impl Linear {
             }
             Self {
                 weight: weight.to_dtype(DType::Float32),
-                bias,
+                bias: bias.map(|bias| bias.to_dtype(DType::Float32)),
                 quantization: None,
             }
         }
@@ -671,14 +675,22 @@ impl Attention {
         // Compute attention
         #[cfg(feature = "mlx")]
         let attn_output = {
-            // Use MLX fused scaled dot-product attention kernel
+            // Use MLX fused scaled dot-product attention kernel. Every
+            // materialized mask this engine passes to the talker/predictor is
+            // a square causal prefill mask, so route it to MLX's dedicated
+            // causal path, which skips the mask array entirely.
             let scale = 1.0 / (self.head_dim as f64).sqrt();
+            let mask = match attention_mask {
+                Some(_) if seq_len > 1 && key.size()[2] == seq_len => mlx::ops::SdpaMask::Causal,
+                Some(mask) => mlx::ops::SdpaMask::Array(mask.as_mlx()),
+                None => mlx::ops::SdpaMask::None,
+            };
             Tensor::from_mlx(mlx::ops::fast_scaled_dot_product_attention(
                 query.as_mlx(),
                 key.as_mlx(),
                 value.as_mlx(),
                 scale as f32,
-                attention_mask.map(|m| m.as_mlx()),
+                mask,
             ))
         };
         #[cfg(not(feature = "mlx"))]
@@ -786,12 +798,18 @@ impl Attention {
         #[cfg(feature = "mlx")]
         let attn_output = {
             let scale = 1.0 / (self.head_dim as f64).sqrt();
+            // Traced path keeps the additive array mask so trace tensors stay
+            // bit-comparable with the Python reference.
+            let mask = match attention_mask {
+                Some(mask) => mlx::ops::SdpaMask::Array(mask.as_mlx()),
+                None => mlx::ops::SdpaMask::None,
+            };
             Tensor::from_mlx(mlx::ops::fast_scaled_dot_product_attention(
                 query.as_mlx(),
                 key.as_mlx(),
                 value.as_mlx(),
                 scale as f32,
-                attention_mask.map(|m| m.as_mlx()),
+                mask,
             ))
         };
         #[cfg(not(feature = "mlx"))]

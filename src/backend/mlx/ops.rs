@@ -713,19 +713,31 @@ pub fn fast_rope(
     res
 }
 
+/// Mask handling for the fused SDPA kernel. `Causal` selects MLX's optimized
+/// causal path, which never materializes a mask array — measurably cheaper
+/// for prefill than an equivalent additive Float32 mask.
+pub enum SdpaMask<'a> {
+    None,
+    Causal,
+    Array(&'a MlxArray),
+}
+
 pub fn fast_scaled_dot_product_attention(
     queries: &MlxArray,
     keys: &MlxArray,
     values: &MlxArray,
     scale: f32,
-    mask: Option<&MlxArray>,
+    mask: SdpaMask,
 ) -> MlxArray {
     let mut res = MlxArray::empty();
-    let mask_arr = mask.map_or(std::ptr::null_mut(), |m| m.ptr);
     // mask_mode must be a valid C string (never null!).
     // Valid values: "" (default/auto), "causal", "array".
     // "" with a mask_arr uses the array mask; "" without uses no mask.
-    let mask_mode = b"\0".as_ptr() as *const std::os::raw::c_char;
+    let (mask_mode, mask_arr): (*const std::os::raw::c_char, ffi::mlx_array) = match mask {
+        SdpaMask::None => (b"\0".as_ptr() as *const _, std::ptr::null_mut()),
+        SdpaMask::Causal => (b"causal\0".as_ptr() as *const _, std::ptr::null_mut()),
+        SdpaMask::Array(mask) => (b"\0".as_ptr() as *const _, mask.ptr),
+    };
     let sinks: ffi::mlx_array = std::ptr::null_mut();
     unsafe {
         ffi::mlx_fast_scaled_dot_product_attention(

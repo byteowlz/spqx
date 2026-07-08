@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use tokenizers::pre_tokenizers::byte_level::ByteLevel;
 use tokenizers::Tokenizer;
 
+#[allow(dead_code)]
 fn round_f32_to_bf16_value(value: f32) -> f32 {
     let bits = value.to_bits();
     let rounding_bias = 0x7fff + ((bits >> 16) & 1);
@@ -29,20 +30,13 @@ fn round_f32_to_bf16_value(value: f32) -> f32 {
 }
 
 fn add_tensors_as_rounded_bf16_values(left: &Tensor, right: &Tensor) -> Tensor {
-    let shape = left.size();
-    let left_values = left.to_vec_f32();
-    let right_values = right.to_vec_f32();
-    debug_assert_eq!(left_values.len() % right_values.len(), 0);
-    let values = left_values
-        .iter()
-        .enumerate()
-        .map(|(index, left)| {
-            round_f32_to_bf16_value(left + right_values[index % right_values.len()])
-        })
-        .collect::<Vec<_>>();
-    Tensor::from_slice_f32(&values)
-        .reshape(&shape)
-        .to_device(left.device())
+    // Add in f32 and round to bf16 (round-to-nearest-even), matching Python
+    // MLX's accumulation semantics — but on device. The previous
+    // implementation round-tripped both tensors through host memory (a full
+    // GPU sync per call) and stored the bf16-rounded values as Float32, which
+    // silently promoted the entire prefill forward to fp32.
+    let sum = &left.to_dtype(DType::Float32) + &right.to_dtype(DType::Float32);
+    sum.to_dtype(DType::BFloat16)
 }
 
 /// Code predictor sub-transformer for generating codes 1-15 autoregressively.
@@ -1392,6 +1386,12 @@ impl TalkerModel {
         let mut code_predictor_caches = (0..self.code_predictor.layers.len())
             .map(|_| KVCache::new())
             .collect::<Vec<_>>();
+        // The transformer is meant to run in bf16 (decode inputs are cast
+        // below), but one fp32 member anywhere in the prompt assembly — e.g.
+        // the fp32 speaker x-vector inside the codec prefix — promotes the
+        // concatenated prompt and with it the entire prefill forward to
+        // Float32. Cast once, authoritatively, here.
+        let input_embeddings = &input_embeddings.to_dtype(DType::BFloat16);
         let prefill_len = input_embeddings.size()[1];
         let mask_zeros = Tensor::zeros(&[prefill_len, prefill_len], DType::Float32, self.device);
         let upper = Tensor::ones(&[prefill_len, prefill_len], DType::Bool, self.device).triu(1);
@@ -1401,8 +1401,16 @@ impl TalkerModel {
             prefill_len,
             prefill_len,
         ]);
+        let prefill_started = std::time::Instant::now();
         let mut normed_hidden =
             self.forward_embeds_with_cache(input_embeddings, Some(&causal_mask), &mut caches);
+        // Force evaluation so the logged prefill time is real, not lazy.
+        normed_hidden.eval();
+        eprintln!(
+            "{{\"type\":\"prefill\",\"positions\":{},\"seconds\":{:.3}}}",
+            prefill_len,
+            prefill_started.elapsed().as_secs_f64()
+        );
         let chunk_size = chunk_size.max(1);
 
         for step in 0..max_codes {
