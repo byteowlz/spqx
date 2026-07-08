@@ -2,7 +2,9 @@
 
 Fast Qwen3-TTS inference in Rust with an Apple Silicon MLX backend: streaming,
 in-context voice cloning, quantized models, and a persistent worker protocol
-built for real-time voice runtimes.
+built for real-time voice runtimes. Built on top of Mario's fork of
+[qwen3_tts_rs](https://github.com/badlogic/qwen3_tts_rs); spqx is the default
+TTS engine of [foxline](https://github.com/byteowlz/foxline).
 
 Measured against the reference Python MLX stack (`mlx_audio` via
 `speech-to-speech`) on the same machine, same model
@@ -40,8 +42,10 @@ practical.
 ## Binaries
 
 - `spqx-tts-worker` — persistent binary-framed worker (stdin/stdout, 9-byte
-  frame header). Drop-in compatible with the PiBot/foxline Python worker
-  protocol and CLI. `pibot-tts-worker` remains as an upstream-name alias.
+  frame header). Drop-in compatible with the
+  [PiBot](https://github.com/badlogic/pibot)/[foxline](https://github.com/byteowlz/foxline)
+  Python worker protocol and CLI. `pibot-tts-worker` remains as an
+  upstream-name alias.
 - `tts` — one-shot text-to-speech with preset voices.
 - `voice_clone` — one-shot voice cloning from reference audio + transcript.
 - `api_server` — OpenAI-compatible HTTP speech API (early; see roadmap).
@@ -75,7 +79,8 @@ cargo build --release --no-default-features --features mlx --bin spqx-tts-worker
 
 ## Usage
 
-Persistent worker (what foxline's `rust-mlx` TTS backend launches):
+Persistent worker (what [foxline](https://github.com/byteowlz/foxline)'s
+`rust-mlx` TTS backend launches):
 
 ```bash
 target/release/spqx-tts-worker \
@@ -147,9 +152,12 @@ spqx is a fork of
 [badlogic/qwen3_tts_rs](https://github.com/badlogic/qwen3_tts_rs) by Mario
 Zechner (derived from
 [second-state/qwen3_tts_rs](https://github.com/second-state/qwen3_tts_rs) by
-Second State), maintained by byteowlz as a standalone TTS engine. The model is
-Qwen3-TTS by the Alibaba Qwen team. Improvements that are not byteowlz-specific
-are offered back upstream. Apache-2.0.
+Second State), maintained by byteowlz as a standalone TTS engine. The worker
+protocol and worker-based voice architecture originate from Mario's
+[PiBot](https://github.com/badlogic/pibot); spqx serves as the TTS engine of
+[foxline](https://github.com/byteowlz/foxline), byteowlz's local voice
+gateway. The model is Qwen3-TTS by the Alibaba Qwen team. Improvements that
+are not byteowlz-specific are offered back upstream. Apache-2.0.
 
 ## Roadmap
 
