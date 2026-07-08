@@ -363,7 +363,7 @@ pub struct CausalConv1d {
 }
 
 /// Streaming state for a causal 1D convolution.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct CausalConv1dState {
     buffer: Option<Tensor>,
 }
@@ -454,7 +454,7 @@ pub struct CausalTransConv1d {
 }
 
 /// Streaming overlap state for a causal transposed 1D convolution.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct CausalTransConv1dState {
     overflow: Option<Tensor>,
 }
@@ -899,6 +899,7 @@ pub struct VocoderTransformer {
 }
 
 /// Streaming KV-cache state for the vocoder pre-transformer.
+#[derive(Clone)]
 pub struct VocoderTransformerState {
     caches: Vec<KVCache>,
 }
@@ -1105,7 +1106,7 @@ pub struct ConvNeXtBlock {
 }
 
 /// Streaming state for a ConvNeXt block.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ConvNeXtBlockState {
     dwconv: CausalConv1dState,
 }
@@ -1204,7 +1205,7 @@ pub struct DecoderResidualUnit {
 }
 
 /// Streaming state for a decoder residual unit.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DecoderResidualUnitState {
     conv1: CausalConv1dState,
     conv2: CausalConv1dState,
@@ -1292,6 +1293,7 @@ pub struct DecoderBlock {
 }
 
 /// Streaming state for a decoder block.
+#[derive(Clone)]
 pub struct DecoderBlockState {
     trans_conv: CausalTransConv1dState,
     residual_units: Vec<DecoderResidualUnitState>,
@@ -1401,6 +1403,7 @@ pub struct Vocoder {
 }
 
 /// Full streaming state for incremental vocoder decoding.
+#[derive(Clone)]
 pub struct VocoderStreamingState {
     pre_conv: CausalConv1dState,
     pre_transformer: VocoderTransformerState,

@@ -361,11 +361,24 @@ impl Worker {
                         "label": "voice_clone_rust"
                     }));
                     ttfa_logged = true;
-                    // The vocoder starts from zeroed causal-conv state, which
-                    // can put a DC step at sample 0 that plays as a pop. A
-                    // short linear fade-in on the first chunk removes it.
+                    // Declick the first chunk. The model can emit a loud
+                    // broadband transient in its first frames (ICL prompt
+                    // boundary artifact — present in the python-mlx worker
+                    // too): clamp outliers against the chunk's own RMS, then
+                    // fade in. A clamped click is a faint tick; an unclamped
+                    // one is a full-scale pop.
                     let mut buffer = samples.to_vec();
-                    let fade = (sample_rate as usize * 5 / 1000).min(buffer.len());
+                    if !buffer.is_empty() {
+                        let rms = (buffer.iter().map(|s| s * s).sum::<f32>()
+                            / buffer.len() as f32)
+                            .sqrt();
+                        // Floor keeps legit loud speech onsets unclamped.
+                        let ceiling = (rms * 4.0).max(0.15);
+                        for sample in buffer.iter_mut() {
+                            *sample = sample.clamp(-ceiling, ceiling);
+                        }
+                    }
+                    let fade = (sample_rate as usize * 20 / 1000).min(buffer.len());
                     for (i, sample) in buffer.iter_mut().take(fade).enumerate() {
                         *sample *= i as f32 / fade as f32;
                     }

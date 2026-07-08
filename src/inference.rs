@@ -3106,8 +3106,22 @@ impl TTSInference {
             .embed_text(&[self.config.tts_pad_token_id as i64]);
         tts_pad_embed.eval();
 
+        // Warm the vocoder with the last second-and-a-bit of the reference:
+        // ICL semantics say generated speech continues from the reference, so
+        // its tail is the correct acoustic context. Costs one small decode at
+        // session build; requests clone the state for free (MLX arrays are
+        // immutable, clones share buffers).
+        let warm_vocoder_state = self.vocoder.as_ref().map(|vocoder| {
+            let mut state = vocoder.streaming_state();
+            const WARM_FRAMES: usize = 16;
+            let tail_start = ref_codes.len().saturating_sub(WARM_FRAMES);
+            let _ = self.decode_codes_to_audio_streaming(&ref_codes[tail_start..], &mut state);
+            state
+        });
+
         Ok(IclSession {
             prompt_cache,
+            warm_vocoder_state,
             tts_pad_embed,
             codec_eos_id: talker_config.codec_eos_token_id as i64,
             im_start,
@@ -3151,10 +3165,10 @@ impl TTSInference {
 
         let sample_rate = 24000u32;
         let mut should_continue = true;
-        let mut vocoder_state = self
-            .vocoder
-            .as_ref()
-            .map(|vocoder| vocoder.streaming_state());
+        let mut vocoder_state = session
+            .warm_vocoder_state
+            .clone()
+            .or_else(|| self.vocoder.as_ref().map(|vocoder| vocoder.streaming_state()));
         self.talker.generate_codes_streaming(
             &input_embeddings,
             max_codes,
@@ -3196,6 +3210,11 @@ pub struct IclPromptCache {
 /// Per-voice state for repeated streaming ICL requests.
 pub struct IclSession {
     prompt_cache: IclPromptCache,
+    /// Vocoder streaming state pre-warmed with the tail of the reference
+    /// codes. Cloned per request so the first generated frames decode
+    /// against real speech context instead of zeroed causal state, which
+    /// otherwise rings audibly (pop/clip) in the first ~50ms.
+    warm_vocoder_state: Option<crate::vocoder::VocoderStreamingState>,
     tts_pad_embed: Tensor,
     codec_eos_id: i64,
     im_start: i64,
