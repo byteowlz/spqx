@@ -42,6 +42,13 @@ fn build_mlx() {
             .define("MLX_BUILD_EXAMPLES", "OFF")
             .define("MLX_BUILD_BENCHMARKS", "OFF")
             .define("BUILD_SHARED_LIBS", "OFF")
+            // An explicit deployment target keeps clang's __builtin_available
+            // machinery sane under the Xcode 26 toolchain on macOS 15. Left
+            // empty, MLX's availability-gated kernel dispatch mis-resolves
+            // (the metal4.0 JIT misfire is one symptom) and can silently
+            // select slow fallback kernels — measured 4-8x on quantized
+            // matmul against the python wheel's CI-built MLX.
+            .define("CMAKE_OSX_DEPLOYMENT_TARGET", "15.0")
             .build()
     };
 

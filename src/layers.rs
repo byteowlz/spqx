@@ -433,17 +433,32 @@ impl RotaryEmbedding {
         seq_len: i64,
         offset: i64,
     ) -> (Tensor, Tensor) {
-        let positions = Tensor::arange_f(
-            offset as f64,
-            (offset + seq_len) as f64,
-            1.0,
-            DType::Float32,
-            q.device(),
-        )
-        .view(&[seq_len, 1]);
-        let freqs = positions.matmul(&self.inv_freq.view(&[1, self.dim / 2]));
-        let cos = freqs.cos().to_dtype(q.kind());
-        let sin = freqs.sin().to_dtype(q.kind());
+        // Slice the precomputed cos/sin tables instead of recomputing
+        // positions, an outer product, cos and sin on every call. This runs
+        // once per LAYER — 28x per talker step and 75x per frame in the code
+        // predictor — and the recomputation dominated kernel-launch overhead
+        // in both prefill and decode. Values are identical: the tables were
+        // built from the same inv_freq in f32.
+        let (cos, sin) = if offset + seq_len <= self.cos_cache.size()[0] {
+            (
+                self.cos_cache.narrow(0, offset, seq_len).to_dtype(q.kind()),
+                self.sin_cache.narrow(0, offset, seq_len).to_dtype(q.kind()),
+            )
+        } else {
+            let positions = Tensor::arange_f(
+                offset as f64,
+                (offset + seq_len) as f64,
+                1.0,
+                DType::Float32,
+                q.device(),
+            )
+            .view(&[seq_len, 1]);
+            let freqs = positions.matmul(&self.inv_freq.view(&[1, self.dim / 2]));
+            (
+                freqs.cos().to_dtype(q.kind()),
+                freqs.sin().to_dtype(q.kind()),
+            )
+        };
 
         let q_embed = self.apply_rope(q, &cos, &sin);
         let k_embed = self.apply_rope(k, &cos, &sin);
@@ -681,7 +696,6 @@ impl Attention {
             // causal path, which skips the mask array entirely.
             let scale = 1.0 / (self.head_dim as f64).sqrt();
             let mask = match attention_mask {
-                Some(_) if seq_len > 1 && key.size()[2] == seq_len => mlx::ops::SdpaMask::Causal,
                 Some(mask) => mlx::ops::SdpaMask::Array(mask.as_mlx()),
                 None => mlx::ops::SdpaMask::None,
             };
@@ -1269,5 +1283,85 @@ mod tests {
 
         let result = snake_activation(&x, &alpha);
         assert_eq!(result.size(), vec![3]);
+    }
+}
+
+#[cfg(all(test, feature = "mlx"))]
+mod qmm_bench {
+    use super::*;
+    use crate::tensor::{DType, Device, Tensor};
+    use std::path::PathBuf;
+
+    #[test]
+    fn prefill_qmm_speed() {
+        crate::backend::mlx::stream::init_mlx(true);
+        let device = Device::gpu();
+        let snapshot = PathBuf::from(std::env::var("HOME").unwrap()).join(
+            ".cache/huggingface/hub/models--mlx-community--Qwen3-TTS-12Hz-0.6B-Base-6bit/snapshots/4e44ed4bcee28a0f89a493e07bde16e6dccd43eb/model.safetensors",
+        );
+        let weights = crate::weights::load_weights_map(&snapshot, device).unwrap();
+        let linear =
+            Linear::from_weight_map(&weights, "talker.model.layers.0.self_attn.q_proj", device)
+                .unwrap();
+        let x = Tensor::ones(&[1, 290, 1024], DType::BFloat16, device);
+        x.eval();
+        for trial in 0..3 {
+            let started = std::time::Instant::now();
+            let outs: Vec<Tensor> = (0..50).map(|_| linear.forward(&x)).collect();
+            for out in &outs {
+                out.eval();
+            }
+            eprintln!(
+                "rust qmm trial {trial}: {:.3} ms/op",
+                started.elapsed().as_secs_f64() / 50.0 * 1000.0
+            );
+        }
+    }
+
+    /// Detects the MLX metal kernel bug that motivated mlx-c's 16-row qmm
+    /// chunking workaround: the full-batch transposed qmm must numerically
+    /// match a 16-row-chunked reference computed through the same kernel.
+    #[test]
+    fn qmm_full_batch_matches_chunked_reference() {
+        crate::backend::mlx::stream::init_mlx(true);
+        let device = Device::gpu();
+        let snapshot = PathBuf::from(std::env::var("HOME").unwrap()).join(
+            ".cache/huggingface/hub/models--mlx-community--Qwen3-TTS-12Hz-0.6B-Base-6bit/snapshots/4e44ed4bcee28a0f89a493e07bde16e6dccd43eb/model.safetensors",
+        );
+        let weights = crate::weights::load_weights_map(&snapshot, device).unwrap();
+        let linear =
+            Linear::from_weight_map(&weights, "talker.model.layers.0.self_attn.q_proj", device)
+                .unwrap();
+        // Varied rows so a broken kernel can't hide behind identical inputs.
+        let rows = 290i64;
+        let values: Vec<f32> = (0..rows * 1024)
+            .map(|i| ((i % 613) as f32 - 306.0) / 306.0)
+            .collect();
+        let x = Tensor::from_slice_f32(&values)
+            .reshape(&[1, rows, 1024])
+            .to_device(device)
+            .to_dtype(DType::BFloat16);
+        let full = linear.forward(&x).to_dtype(DType::Float32);
+        let full_values = full.to_vec_f32();
+
+        let mut chunked_values = Vec::with_capacity(full_values.len());
+        let mut start = 0i64;
+        while start < rows {
+            let len = 16.min(rows - start);
+            let chunk = x.narrow(1, start, len).contiguous();
+            let out = linear.forward(&chunk).to_dtype(DType::Float32);
+            chunked_values.extend(out.to_vec_f32());
+            start += len;
+        }
+
+        let mut max_diff = 0f32;
+        for (a, b) in full_values.iter().zip(chunked_values.iter()) {
+            max_diff = max_diff.max((a - b).abs());
+        }
+        eprintln!("qmm full-vs-chunked max abs diff: {max_diff}");
+        assert!(
+            max_diff < 0.05,
+            "full-batch qmm diverges from chunked reference: {max_diff}"
+        );
     }
 }

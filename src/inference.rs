@@ -289,6 +289,9 @@ impl CodePredictor {
                 let upper = Tensor::ones(&[seq_len, seq_len], DType::Bool, self.device).triu(1);
                 Some(
                     mask.masked_fill(&upper, f64::NEG_INFINITY)
+                        // Match the activation dtype: MLX's fused SDPA rejects
+                        // a mask that doesn't promote to the output dtype.
+                        .to_dtype(input.kind())
                         .view(&[1, 1, seq_len, seq_len]),
                 )
             } else {
@@ -1186,9 +1189,25 @@ impl TalkerModel {
     ) -> Tensor {
         let mut hidden = embeddings.shallow_clone();
 
-        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+        // SPQX_TIMING_DETAIL=1: force-eval every 4 layers and log stage times
+        // (profiling only — the evals serialize the pipeline).
+        let detail = embeddings.size()[1] > 1 && std::env::var_os("SPQX_TIMING_DETAIL").is_some();
+        let started = std::time::Instant::now();
+        let mut last = 0f64;
+
+        for (index, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate() {
             hidden =
                 layer.forward_with_cache(&hidden, &self.rotary_emb, attention_mask, Some(cache));
+            if detail && (index + 1) % 4 == 0 {
+                hidden.eval();
+                let now = started.elapsed().as_secs_f64();
+                eprintln!(
+                    "{{\"type\":\"prefill_layers\",\"through\":{},\"stage_ms\":{:.1}}}",
+                    index + 1,
+                    (now - last) * 1000.0
+                );
+                last = now;
+            }
         }
 
         self.norm.forward(&hidden)
@@ -1503,24 +1522,30 @@ impl TalkerModel {
         // Float32. Cast once, authoritatively, here.
         let input_embeddings = &input_embeddings.to_dtype(DType::BFloat16);
         let prefill_len = input_embeddings.size()[1];
+        // The additive causal mask must match the activation dtype (bf16):
+        // MLX's fused SDPA kernel rejects a dtype-mismatched mask and silently
+        // falls back to the slow composed path — 3x prefill cost. Mirrors
+        // python (mask.astype(inputs_embeds.dtype)).
         let mask_zeros = Tensor::zeros(&[prefill_len, prefill_len], DType::Float32, self.device);
         let upper = Tensor::ones(&[prefill_len, prefill_len], DType::Bool, self.device).triu(1);
-        let causal_mask = mask_zeros.masked_fill(&upper, f64::NEG_INFINITY).view(&[
-            1,
-            1,
-            prefill_len,
-            prefill_len,
-        ]);
+        let causal_mask = mask_zeros
+            .masked_fill(&upper, f64::NEG_INFINITY)
+            .to_dtype(DType::BFloat16)
+            .view(&[1, 1, prefill_len, prefill_len]);
         let prefill_started = std::time::Instant::now();
         let mut normed_hidden =
             self.forward_embeds_with_cache(input_embeddings, Some(&causal_mask), &mut caches);
-        // Force evaluation so the logged prefill time is real, not lazy.
-        normed_hidden.eval();
-        eprintln!(
-            "{{\"type\":\"prefill\",\"positions\":{},\"seconds\":{:.3}}}",
-            prefill_len,
-            prefill_started.elapsed().as_secs_f64()
-        );
+        // Prefill timing needs a forced evaluation, which costs a GPU sync
+        // between prefill and the first decode step and breaks MLX's
+        // pipelining — opt-in for profiling only.
+        if std::env::var_os("SPQX_TIMING").is_some() {
+            normed_hidden.eval();
+            eprintln!(
+                "{{\"type\":\"prefill\",\"positions\":{},\"seconds\":{:.3}}}",
+                prefill_len,
+                prefill_started.elapsed().as_secs_f64()
+            );
+        }
         let chunk_size = chunk_size.max(1);
 
         for step in 0..max_codes {
