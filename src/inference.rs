@@ -1239,62 +1239,91 @@ impl TalkerModel {
         top_k: i64,
         repetition_penalty: f64,
         past_codes: &[i64],
+        eos_code: i64,
     ) -> i64 {
         let last_hidden = normed_hidden.select(1, normed_hidden.size()[1] - 1);
-        // Sample code 0 in f32. The legacy host-side repetition penalty
-        // re-uploaded logits as Float32, so code-0 sampling always ran in
-        // f32; in bf16 the EOS logit quantizes below the top-k threshold on
-        // longer generations and the model never terminates. The cast is a
-        // tiny on-device op, not a sync.
+        // Sample code 0 in f32 on device (tiny cast, not a sync); bf16
+        // sampling loses the tail of the distribution.
         let mut logits = self
             .codec_head
             .forward(&last_hidden)
             .to_dtype(DType::Float32);
+        let vocab_size = logits.size()[logits.dim() - 1];
 
-        // Apply repetition penalty to previously generated codes, on device.
-        // The penalty COMPOUNDS per occurrence (factor = p^count): codes
-        // repeated in a silence loop get exponentially suppressed, which is
-        // what breaks the loop — a single application is measurably too weak.
-        // min(s*f^-1, s*f) picks s/f for positive s and s*f for negative s,
-        // the divide-positive/multiply-negative rule; unseen codes have f = 1
-        // and pass through. The factor upload is asynchronous; the previous
-        // implementation downloaded the full logits (a forced GPU sync per
-        // frame) and re-uploaded them.
+        // The block below mirrors mlx_audio's qwen3_tts._sample_token, which
+        // is what keeps long ICL generations from degenerating into EOS-less
+        // code loops. Three mechanisms, all on device (the uploads are
+        // asynchronous, never a GPU sync):
+        // 1. Suppress the special-token tail (last 1024 vocab entries)
+        //    except EOS.
+        // 2. Repetition penalty applied ONCE per unique past code.
+        // 3. EOS is exempt from top-k filtering, so termination stays
+        //    reachable even when EOS is below the top-k threshold.
+        // -1e9 instead of -inf: the repetition penalty below computes
+        // (penalized - logits), and -inf - (-inf) = NaN would poison every
+        // suppressed position. exp(-1e9) is still exactly zero in f32.
+        let start = (vocab_size as usize).saturating_sub(1024);
+        let mut suppress = vec![0f32; vocab_size as usize];
+        for (index, value) in suppress.iter_mut().enumerate().skip(start) {
+            if index as i64 != eos_code {
+                *value = -1e9;
+            }
+        }
+        let suppress = Tensor::from_slice_f32(&suppress)
+            .reshape(&logits.size())
+            .to_device(self.device);
+        logits = &logits + &suppress;
+
+        // min(s/p, s*p) picks s/p for positive s and s*p for negative s —
+        // the divide-positive/multiply-negative rule, applied once per unique
+        // code via a binary membership mask (python-parity: mlx_audio uses
+        // set(generated_tokens)).
         if repetition_penalty != 1.0 && !past_codes.is_empty() {
-            let vocab_size = logits.size()[logits.dim() - 1] as usize;
-            let mut factor = vec![1f32; vocab_size];
+            let mut mask = vec![0f32; vocab_size as usize];
             for &code in past_codes {
-                if (code as usize) < vocab_size {
-                    factor[code as usize] *= repetition_penalty as f32;
+                if (code as usize) < vocab_size as usize {
+                    mask[code as usize] = 1.0;
                 }
             }
-            let inverse: Vec<f32> = factor.iter().map(|value| 1.0 / value).collect();
-            let factor = Tensor::from_slice_f32(&factor)
+            let mask = Tensor::from_slice_f32(&mask)
                 .reshape(&logits.size())
                 .to_device(self.device);
-            let inverse = Tensor::from_slice_f32(&inverse)
-                .reshape(&logits.size())
-                .to_device(self.device);
-            logits = (&logits * &inverse).minimum(&(&logits * &factor));
+            let penalized =
+                (&logits / repetition_penalty).minimum(&(&logits * repetition_penalty));
+            logits = &logits + (&penalized - &logits) * &mask;
         }
 
         if temperature <= 0.0 {
             logits.argmax(-1, false).int64_value(&[0])
         } else {
-            let logits = &logits / temperature;
+            let scaled = &logits / temperature;
 
-            let logits = if top_k > 0 {
-                let vocab_size = logits.size()[logits.dim() - 1];
-                let k = top_k.min(vocab_size);
-                let top_values = logits.topk_values(k, -1, true, true);
-                let threshold = top_values.select(-1, k - 1);
-                let mask = logits.lt_tensor(&threshold.unsqueeze(-1));
-                logits.masked_fill(&mask, f64::NEG_INFINITY)
+            let filtered = if top_k > 0 && top_k < vocab_size {
+                let top_values = scaled.topk_values(top_k, -1, true, true);
+                let threshold = top_values.select(-1, top_k - 1);
+                let mask = scaled.lt_tensor(&threshold.unsqueeze(-1));
+                // A large finite negative instead of -inf: exp() still hits
+                // exact zero in f32, and it keeps the EOS restore below free
+                // of -inf * 0 = NaN.
+                let filtered = scaled.masked_fill(&mask, -1e9);
+                let mut eos_onehot = vec![0f32; vocab_size as usize];
+                let mut eos_keep = vec![1f32; vocab_size as usize];
+                if (eos_code as usize) < vocab_size as usize {
+                    eos_onehot[eos_code as usize] = 1.0;
+                    eos_keep[eos_code as usize] = 0.0;
+                }
+                let eos_onehot = Tensor::from_slice_f32(&eos_onehot)
+                    .reshape(&scaled.size())
+                    .to_device(self.device);
+                let eos_keep = Tensor::from_slice_f32(&eos_keep)
+                    .reshape(&scaled.size())
+                    .to_device(self.device);
+                &filtered * &eos_keep + &scaled * &eos_onehot
             } else {
-                logits
+                scaled
             };
 
-            let probs = logits.softmax(-1);
+            let probs = filtered.softmax(-1);
             probs.multinomial(1, true).int64_value(&[0, 0])
         }
     }
@@ -1336,7 +1365,10 @@ impl TalkerModel {
         eos_code: i64,
         tts_pad_embed: &Tensor,
     ) -> (Vec<Vec<i64>>, DetailedGenerationTimings) {
-        let repetition_penalty = 1.05; // From generation_config.json
+        // Python parity: mlx_audio bumps the penalty to max(p, 1.5) for ICL
+        // voice cloning "to prevent code degeneration with long reference
+        // audio prefills". This engine's only shipped path is ICL cloning.
+        let repetition_penalty = 1.5;
         let total_start = Instant::now();
         let mut timings = DetailedGenerationTimings::default();
         let mut all_codes = Vec::new();
@@ -1371,6 +1403,7 @@ impl TalkerModel {
                 top_k,
                 repetition_penalty,
                 &past_code_0s,
+                eos_code,
             );
             past_code_0s.push(code_0);
 
@@ -1450,7 +1483,10 @@ impl TalkerModel {
     where
         F: FnMut(&[Vec<i64>]) -> bool,
     {
-        let repetition_penalty = 1.05; // From generation_config.json
+        // Python parity: mlx_audio bumps the penalty to max(p, 1.5) for ICL
+        // voice cloning "to prevent code degeneration with long reference
+        // audio prefills". This engine's only shipped path is ICL cloning.
+        let repetition_penalty = 1.5;
         let mut all_codes = Vec::new();
         let mut pending_codes = Vec::new();
         let mut past_code_0s: Vec<i64> = Vec::new();
@@ -1495,6 +1531,7 @@ impl TalkerModel {
                 top_k,
                 repetition_penalty,
                 &past_code_0s,
+                eos_code,
             );
             past_code_0s.push(code_0);
 
@@ -2776,6 +2813,7 @@ impl TTSInference {
                 top_k,
                 repetition_penalty,
                 &generated_token_ids,
+                codec_eos_id,
             );
             let forced_frame = forced_generated_codes.and_then(|codes| codes.get(step as usize));
             let code_0 = forced_frame
@@ -3187,32 +3225,35 @@ mod penalty_tests {
         let past_codes: Vec<i64> = vec![0, 1, 6, 7, 7];
         let p = 1.05f64;
 
-        // Host reference (legacy implementation).
+        // Host reference: python parity (mlx_audio _sample_token) applies the
+        // penalty ONCE per unique past code — code 7 appearing twice above
+        // must be penalized only once.
         let mut expected = logits_host.clone();
+        let mut seen = std::collections::HashSet::new();
         for &code in &past_codes {
+            if !seen.insert(code) {
+                continue;
+            }
             let idx = code as usize;
             let s = expected[idx];
             expected[idx] = if s > 0.0 { s / p as f32 } else { s * p as f32 };
         }
 
-        // Device implementation (predict_code_0's math). The penalty must
-        // compound per occurrence — code 7 appears twice above.
+        // Device implementation (predict_code_0's math): binary membership
+        // mask, min(s/p, s*p) rule.
         let logits = Tensor::from_slice_f32(&logits_host)
             .reshape(&[1, vocab as i64])
             .to_device(device)
             .to_dtype(DType::Float32);
-        let mut factor = vec![1f32; vocab];
+        let mut mask = vec![0f32; vocab];
         for &code in &past_codes {
-            factor[code as usize] *= p as f32;
+            mask[code as usize] = 1.0;
         }
-        let inverse: Vec<f32> = factor.iter().map(|value| 1.0 / value).collect();
-        let factor = Tensor::from_slice_f32(&factor)
+        let mask = Tensor::from_slice_f32(&mask)
             .reshape(&logits.size())
             .to_device(device);
-        let inverse = Tensor::from_slice_f32(&inverse)
-            .reshape(&logits.size())
-            .to_device(device);
-        let result = (&logits * &inverse).minimum(&(&logits * &factor));
+        let penalized = (&logits / p).minimum(&(&logits * p));
+        let result = &logits + (&penalized - &logits) * &mask;
         let got = result.to_vec_f32();
 
         for (i, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
