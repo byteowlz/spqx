@@ -10,6 +10,7 @@ mod engine;
 mod paths;
 mod playback;
 mod say;
+mod voices;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -64,6 +65,8 @@ pub struct CommonOpts {
 enum Command {
     /// Speak text with live playback and/or WAV output
     Say(say::SayArgs),
+    /// Manage the named voice registry
+    Voices(voices::VoicesArgs),
     /// Inspect and manage configuration
     Config {
         #[command(subcommand)]
@@ -96,6 +99,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Say(args) => say::run(args, &cli.common),
+        Command::Voices(args) => voices::run(args, &cli.common),
         Command::Config { command } => run_config(command, &cli.common),
         Command::Completions { shell } => {
             let mut cmd = Cli::command();

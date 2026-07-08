@@ -129,7 +129,7 @@ pub fn resolve_reference(
     })
 }
 
-fn voices_dir(config: &Config) -> Result<PathBuf> {
+pub fn voices_dir(config: &Config) -> Result<PathBuf> {
     match &config.paths.voices_dir {
         Some(dir) => Ok(expand(dir)),
         None => paths::voices_dir(),
