@@ -36,12 +36,41 @@ fn build_mlx() {
     }
 
     // Build mlx-c via CMake
-    let dst = cmake::Config::new(&mlx_c_dir)
-        .define("MLX_BUILD_TESTS", "OFF")
-        .define("MLX_BUILD_EXAMPLES", "OFF")
-        .define("MLX_BUILD_BENCHMARKS", "OFF")
-        .define("BUILD_SHARED_LIBS", "OFF")
-        .build();
+    let build_mlx_c = || {
+        cmake::Config::new(&mlx_c_dir)
+            .define("MLX_BUILD_TESTS", "OFF")
+            .define("MLX_BUILD_EXAMPLES", "OFF")
+            .define("MLX_BUILD_BENCHMARKS", "OFF")
+            .define("BUILD_SHARED_LIBS", "OFF")
+            .build()
+    };
+
+    // MLX's runtime Metal JIT selects -std=metal4.0 behind
+    // __builtin_available(macOS 26, ...), which misfires on macOS 15 with the
+    // Xcode 26 toolchain and aborts kernel compilation ("invalid value
+    // 'metal4.0'"). Cap the JIT language version at 3.2, which every MLX
+    // kernel supports. The MLX source is FetchContent'd during the cmake run,
+    // so patch after the first build and rebuild if the bad branch is present.
+    let patch_metal_version = |out_dir: &std::path::Path| -> bool {
+        let device_cpp = out_dir.join("build/_deps/mlx-src/mlx/backend/metal/device.cpp");
+        let Ok(source) = std::fs::read_to_string(&device_cpp) else {
+            return false;
+        };
+        if !source.contains("MTL::LanguageVersion4_0") {
+            return false;
+        }
+        let patched = source.replace(
+            "return MTL::LanguageVersion4_0;",
+            "return MTL::LanguageVersion3_2; // spqx: metal4.0 JIT breaks on macOS 15 + Xcode 26",
+        );
+        std::fs::write(&device_cpp, patched).expect("failed to patch mlx device.cpp");
+        true
+    };
+
+    let mut dst = build_mlx_c();
+    if patch_metal_version(&dst) {
+        dst = build_mlx_c();
+    }
 
     // Link paths
     let lib_dir = dst.join("lib");
