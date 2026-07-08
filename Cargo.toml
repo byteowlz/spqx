@@ -75,6 +75,11 @@ name = "api_server"
 path = "src/bin/api_server.rs"
 
 [[bin]]
+name = "spqx-tts-worker"
+path = "src/bin/worker.rs"
+
+# Compatibility alias for the upstream (Pipi/PiBot) binary name; same code.
+[[bin]]
 name = "pibot-tts-worker"
 path = "src/bin/worker.rs"
 

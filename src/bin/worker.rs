@@ -47,7 +47,7 @@ extern "C" {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "pibot-tts-worker",
+    name = "spqx-tts-worker",
     about = "Persistent Qwen3 TTS binary-framed worker"
 )]
 struct Args {
