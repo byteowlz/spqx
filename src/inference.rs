@@ -3188,6 +3188,13 @@ impl TTSInference {
             .talker
             .build_input_embeddings_from_icl_cache(&session.prompt_cache, &synth_token_ids);
 
+        // Runaway insurance (python parity: mlx_audio's effective_max_tokens):
+        // at 12.5 codec frames/s, ~3-5 frames per text token is typical
+        // speech; 6x leaves margin for slow delivery and pauses. A generation
+        // that misses EOS then stops within seconds instead of running to the
+        // global cap (1536 frames = 2 minutes of audio).
+        let effective_max_codes = max_codes.min((synth_ids.len() as i64 * 6).max(75));
+
         let sample_rate = 24000u32;
         let mut should_continue = true;
         let mut vocoder_state = session
@@ -3196,7 +3203,7 @@ impl TTSInference {
             .or_else(|| self.vocoder.as_ref().map(|vocoder| vocoder.streaming_state()));
         self.talker.generate_codes_streaming(
             &input_embeddings,
-            max_codes,
+            effective_max_codes,
             temperature,
             top_k,
             session.codec_eos_id,
