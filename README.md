@@ -1,166 +1,162 @@
-# qwen3-tts-rs
+# spqx
 
-Rust Qwen3-TTS inference with an Apple Silicon MLX backend. This fork is maintained for Pipi's native TTS worker and for Rust/Python MLX parity work.
+Fast Qwen3-TTS inference in Rust with an Apple Silicon MLX backend: streaming,
+in-context voice cloning, quantized models, and a persistent worker protocol
+built for real-time voice runtimes.
 
-## What this fork contains
+Measured against the reference Python MLX stack (`mlx_audio` via
+`speech-to-speech`) on the same machine, same model
+(`Qwen3-TTS-12Hz-0.6B-Base-6bit`), same seven cloned voices, 49 utterances:
 
-- `pibot-tts-worker`: persistent binary-framed TTS worker used by Pipi.
-- `tts`: one-shot text-to-speech CLI.
-- `voice_clone`: one-shot voice-cloning CLI.
-- `api_server`: OpenAI-compatible HTTP speech API.
-- `trace_rust`: Rust trace generator for MLX parity debugging.
-- Python trace/compare tools in `scripts/`.
+|                     | Python MLX | spqx      |
+| ------------------- | ---------- | --------- |
+| Time to first audio | 120 ms     | **96 ms** |
+| (p95)               | 175 ms     | 152 ms    |
+| Real-time factor    | 0.22       | **0.20**  |
+| Model load          | 2.3 s      | **0.3 s** |
 
-The important path for Pipi is the MLX backend plus `pibot-tts-worker`.
+The 0.3s model load makes per-session workers and instant voice switching
+practical.
+
+## Why it is fast (and correct)
+
+- Everything decode-side runs on device with one GPU sync per audio frame:
+  device-chained sub-code sampling, on-device repetition penalty, cached RoPE
+  tables, fused SDPA with dtype-correct masks, bf16 end to end.
+- The per-voice ICL prompt (reference text + codec frames) is precomputed once
+  per session; requests only pay for their own text.
+- Sampling mirrors `mlx_audio` exactly — repetition penalty 1.5 applied once
+  per unique code for ICL, special-token suppression, EOS exempt from top-k —
+  so long generations terminate reliably and voices match the reference
+  implementation.
+- Output cleanup: the vocoder streaming state is pre-warmed with the tail of
+  the reference audio (ICL semantics: generated speech continues from the
+  reference), and a duration-capped click gate removes utterance-start
+  transients without ever touching plosives or soft leading words
+  (ASR-verified).
+- Numerical guardrails ship as tests: full-batch quantized matmul against a
+  chunked reference, and sampling-penalty parity against the Python semantics.
+
+## Binaries
+
+- `spqx-tts-worker` — persistent binary-framed worker (stdin/stdout, 9-byte
+  frame header). Drop-in compatible with the PiBot/foxline Python worker
+  protocol and CLI. `pibot-tts-worker` remains as an upstream-name alias.
+- `tts` — one-shot text-to-speech with preset voices.
+- `voice_clone` — one-shot voice cloning from reference audio + transcript.
+- `api_server` — OpenAI-compatible HTTP speech API (early; see roadmap).
+- `qwen3-tts` — timed CLI for performance work; `trace_rust` generates MLX
+  parity traces against the Python implementation (compare tools in
+  `scripts/`).
 
 ## Requirements
 
-- Apple Silicon Mac.
-- Rust toolchain.
-- Xcode command line tools and Metal toolchain.
-- CMake, pkg-config, and Opus.
+- Apple Silicon Mac for the MLX backend. A libtorch (`tch`) backend exists for
+  Linux/CUDA with dense bf16 weights.
+- Rust toolchain; CMake, pkg-config, Opus; Xcode command line tools with the
+  Metal toolchain.
 
 ```bash
 brew install cmake pkg-config opus
 xcodebuild -downloadComponent MetalToolchain
 ```
 
-## Build
+Known toolchain hazards are handled in `build.rs`: it pins an explicit macOS
+deployment target and patches an MLX `__builtin_available(macOS 26)` misfire
+that otherwise breaks Metal kernel JIT on macOS 15 with the Xcode 26
+toolchain.
 
-From this repository:
+## Build
 
 ```bash
 git submodule update --init --recursive
-cargo build --release --no-default-features --features mlx --bin pibot-tts-worker
+cargo build --release --no-default-features --features mlx --bin spqx-tts-worker
 ```
 
-Build all MLX binaries:
+## Usage
+
+Persistent worker (what foxline's `rust-mlx` TTS backend launches):
 
 ```bash
-cargo build --release --no-default-features --features mlx
-```
-
-Pipi builds this submodule with:
-
-```bash
-npm run build:tts-rust
-```
-
-from the Pipi repository root.
-
-## Models
-
-Pipi currently defaults to the 0.6B Base 6-bit MLX model:
-
-```text
-mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit
-```
-
-The 1.7B Base 6-bit MLX model is also supported and was used for parity/performance testing:
-
-```text
-mlx-community/Qwen3-TTS-12Hz-1.7B-Base-6bit
-```
-
-Dense BF16 Qwen/Qwen3-TTS models are still supported. Dense MLX linear weights and biases are intentionally cast to FP32 in this fork; this is required for good audio quality with the unquantized 0.6B model.
-
-## Pipi worker
-
-Example worker invocation:
-
-```bash
-target/release/pibot-tts-worker \
+target/release/spqx-tts-worker \
   --serve \
-  --model-name /path/to/qwen3-tts-model \
+  --model-path /path/to/Qwen3-TTS-12Hz-0.6B-Base-6bit \
   --ref-audio /path/to/reference.wav \
   --ref-text-file /path/to/reference.txt \
-  --language de \
-  --output-sample-rate 24000 \
-  --temperature 0.7 \
-  --top-k 30
+  --language auto \
+  --output-sample-rate 24000
 ```
 
-The worker uses a binary stdin/stdout protocol and logs status/events on stderr. It emits streamed PCM chunks for low-latency playback.
+The worker reads `speak`/`cancel`/`shutdown` frames on stdin and streams PCM
+`audio_chunk` frames on stdout; JSON status events (`ready`, `ttfa`,
+`generated`) go to stderr. `--model-path` accepts the MLX quantized snapshots
+from `mlx-community` (4/6/8-bit) or dense BF16 `Qwen/Qwen3-TTS` layouts.
 
-Language names and short aliases are normalized by the worker, e.g. `de` maps to `german`. `auto` remains supported.
-
-## One-shot CLIs
-
-Text-to-speech with a preset/custom voice model:
+One-shot cloning:
 
 ```bash
-target/release/tts /path/to/Qwen3-TTS-12Hz-0.6B-CustomVoice \
-  "Hello world" Vivian english
+target/release/voice_clone /path/to/Qwen3-TTS-12Hz-0.6B-Base-6bit \
+  reference.wav "Hello from a cloned voice." english "Reference transcript"
 ```
 
-Voice cloning with a Base model:
+### Debug/profiling knobs
+
+- `SPQX_TIMING=1` — log per-request prefill timing (adds one GPU sync).
+- `SPQX_TIMING_DETAIL=1` — per-layer-group prefill breakdown.
+- `SPQX_NO_GATE=1` — bypass all output cleanup (raw model audio).
+- `MLX_C_CHUNKED_QMM=1` — re-enable chunked quantized matmul (see below).
+
+## Quantized matmul and the Metal toolchain
+
+Some Xcode 26 Metal toolchains miscompile the locally built `mlx.metallib`,
+producing incorrect results for large-M transposed 6-bit `quantized_matmul`
+(upstream report: <https://github.com/ml-explore/mlx/issues/3586>, repro:
+<https://github.com/badlogic/mlx-qmm-repro>). The mlx-c layer used here
+([byteowlz/mlx-c](https://github.com/byteowlz/mlx-c), branch `spqx`) makes the
+16-row chunking workaround for that case opt-in via `MLX_C_CHUNKED_QMM=1`
+rather than always-on — unconditional chunking costs 3-4x on prompt prefill.
+On a sound toolchain the full-batch kernel matches a chunked reference to bf16
+noise; verify yours with:
 
 ```bash
-target/release/voice_clone /path/to/Qwen3-TTS-12Hz-0.6B-Base \
-  reference.wav \
-  "Hello from a cloned voice." \
-  english \
-  "Transcript of the reference audio"
+cargo test --release --no-default-features --features mlx \
+  --lib qmm_full_batch_matches_chunked_reference -- --nocapture
 ```
 
-Reference audio should be mono 24 kHz WAV.
+## Voice references
 
-## Python/Rust MLX parity tools
+Cloning quality is bounded by the reference recording. Hard-won guidelines:
 
-Generate Python MLX traces:
+- 6-12 seconds; longer references measurably degrade first-word reliability.
+- End on a sentence boundary with a natural pause; trailing cut-off transients
+  poison both the vocoder warm state and the clone.
+- Scan for isolated clicks (spike over near-silence) — the clone reproduces
+  reference artifacts as voice mannerisms.
+- After changing a reference, generate a round and ASR-check the first words.
 
-```bash
-python3 scripts/trace_python_mlx.py \
-  --model /path/to/model \
-  --ref-audio /path/to/reference.wav \
-  --ref-text-file /path/to/reference.txt \
-  --text "Hallo" \
-  --language de \
-  --out /tmp/python-trace
-```
+## Python/Rust parity tools
 
-Generate Rust MLX traces:
+`scripts/trace_python_mlx.py` and `trace_rust` dump per-layer tensors from
+both implementations; `scripts/compare_traces.py` diffs them. The trace tools
+support forced/reference code paths to isolate talker/code-predictor parity
+from audio-encoder drift.
 
-```bash
-cargo run --release --no-default-features --features mlx --bin trace_rust -- \
-  --model /path/to/model \
-  --ref-audio /path/to/reference.wav \
-  --ref-text-file /path/to/reference.txt \
-  --text "Hallo" \
-  --language de \
-  --out /tmp/rust-trace
-```
+## Lineage and license
 
-Compare traces:
+spqx is a fork of
+[badlogic/qwen3_tts_rs](https://github.com/badlogic/qwen3_tts_rs) by Mario
+Zechner (derived from
+[second-state/qwen3_tts_rs](https://github.com/second-state/qwen3_tts_rs) by
+Second State), maintained by byteowlz as a standalone TTS engine. The model is
+Qwen3-TTS by the Alibaba Qwen team. Improvements that are not byteowlz-specific
+are offered back upstream. Apache-2.0.
 
-```bash
-python3 scripts/compare_traces.py /tmp/python-trace /tmp/rust-trace
-```
+## Roadmap
 
-The trace tools support forced/reference code paths used to isolate talker/code-predictor parity from audio-encoder drift.
+- Single `spqx` binary with subcommands (`say`, `clone`, `serve`, `api`,
+  `ref check|trim|verify`) and a packaged metallib.
+- Hardened OpenAI-compatible API with chunked streaming and a named-voice
+  registry.
+- Candle backend for pure-Rust quantized CUDA/CPU inference.
 
-## MLX qmatmul workaround
-
-MLX loads `mlx.metallib` at runtime for Metal kernels. With Xcode 26.5 / Metal compiler `metalfe-32023.883`, locally source-built MLX `v0.31.2` can produce incorrect results for large-M transposed 6-bit `quantized_matmul` / `qmm_splitk` calls. The official Python MLX wheel artifact does not show the same issue.
-
-The vendored MLX-C wrapper in this fork works around the bad local Metal artifact by chunking large 2D/3D transposed quantized matmul calls into 16-token slices before calling MLX core. This keeps MLX's real quantized Metal kernels, avoids dequantization, and restores parity with Python MLX for Qwen3-TTS.
-
-Standalone repro:
-
-```text
-https://github.com/badlogic/mlx-qmm-repro
-```
-
-Upstream issue:
-
-```text
-https://github.com/ml-explore/mlx/issues/3586
-```
-
-## License
-
-Apache-2.0
-
-## Credits
-
-Based on the original Rust implementation from Second State and the Qwen3-TTS Python/MLX implementation from the Alibaba Qwen team.
+Issue tracking lives in-repo via `trx`.
