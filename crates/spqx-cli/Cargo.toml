@@ -10,12 +10,20 @@ description = "spqx: fast local text-to-speech with voice cloning (CLI)"
 name = "spqx"
 path = "src/main.rs"
 
+[features]
+# One backend must be selected. mlx is the default on Apple Silicon.
+default = ["mlx"]
+mlx = ["spqx-core/mlx"]
+tch = ["spqx-core/tch-backend"]
+
 [dependencies]
+spqx-core = { path = "../spqx-core", default-features = false }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = "4.5"
 env_logger = "0.11"
 log = "0.4"
+rodio = "0.20"
 schemars = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

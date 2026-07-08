@@ -97,6 +97,7 @@ pub mod error;
 pub mod inference;
 pub mod layers;
 pub mod model;
+pub mod postprocess;
 pub mod speaker_encoder;
 pub mod tokenizer;
 pub mod types;

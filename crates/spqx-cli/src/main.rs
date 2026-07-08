@@ -6,7 +6,10 @@
 //! everything else.
 
 mod config;
+mod engine;
 mod paths;
+mod playback;
+mod say;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -33,7 +36,7 @@ struct Cli {
 
 /// Global options shared by all subcommands.
 #[derive(Debug, Clone, Args)]
-struct CommonOpts {
+pub struct CommonOpts {
     /// Override the config file path (also: SPQX_CONFIG)
     #[arg(long, value_name = "PATH", global = true, env = "SPQX_CONFIG")]
     config: Option<PathBuf>,
@@ -59,6 +62,8 @@ struct CommonOpts {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Speak text with live playback and/or WAV output
+    Say(say::SayArgs),
     /// Inspect and manage configuration
     Config {
         #[command(subcommand)]
@@ -90,6 +95,7 @@ fn main() -> Result<()> {
     init_logging(&cli.common);
 
     match cli.command {
+        Command::Say(args) => say::run(args, &cli.common),
         Command::Config { command } => run_config(command, &cli.common),
         Command::Completions { shell } => {
             let mut cmd = Cli::command();
