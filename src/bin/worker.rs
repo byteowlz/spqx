@@ -371,7 +371,10 @@ impl Worker {
                     // never touched. Clamping instead of gating audibly
                     // squashes soft speech onsets; do not reintroduce it.
                     let mut buffer = samples.to_vec();
-                    gate_leading_nonspeech(&mut buffer, sample_rate);
+                    // SPQX_NO_GATE=1 bypasses output cleanup for debugging.
+                    if std::env::var_os("SPQX_NO_GATE").is_none() {
+                        gate_leading_nonspeech(&mut buffer, sample_rate);
+                    }
                     faded = buffer;
                     &faded
                 };
@@ -441,6 +444,11 @@ impl PcmStreamer {
             resample(samples, sample_rate, self.output_sample_rate)?
         };
         let mut pcm = samples_to_i16(&samples);
+        if !self.found_speech {
+            if std::env::var_os("SPQX_NO_GATE").is_some() {
+                self.found_speech = true;
+            }
+        }
         if !self.found_speech {
             // Low threshold and generous preroll: a soft unvoiced plosive at
             // utterance start ("T" in "Tune") sits well below typical speech
@@ -789,7 +797,10 @@ fn gate_leading_nonspeech(samples: &mut [f32], sample_rate: u32) {
     }
 
     // Zero only isolated high bursts (plus quiet shoulders) in the leading
-    // silence — never the region wholesale.
+    // silence — never the region wholesale, and never anything longer than
+    // 50ms: a click's connected above-silence region is short, while a
+    // softly spoken word that failed the onset density test spans 100ms+.
+    // Without the duration cap this pass erased whole leading words.
     let mut index = 0usize;
     while index < true_start {
         if peaks[index] > CLICK_LEVEL {
@@ -801,10 +812,12 @@ fn gate_leading_nonspeech(samples: &mut [f32], sample_rate: u32) {
             while end_block < true_start && peaks[end_block] > QUIET_LEVEL {
                 end_block += 1;
             }
-            let start = start_block * block;
-            let end = (end_block * block).min(samples.len());
-            for sample in samples[start..end].iter_mut() {
-                *sample = 0.0;
+            if end_block - start_block <= 10 {
+                let start = start_block * block;
+                let end = (end_block * block).min(samples.len());
+                for sample in samples[start..end].iter_mut() {
+                    *sample = 0.0;
+                }
             }
             index = end_block;
         } else {
