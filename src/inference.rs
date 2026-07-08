@@ -970,6 +970,155 @@ impl TalkerModel {
         input_embeddings
     }
 
+    /// Precompute the synthesis-independent parts of the ICL prompt: phases 1,
+    /// 2 and 4 plus the reference-text share of phase 3. Building the
+    /// reference side costs ~16 small device ops per reference codec frame,
+    /// which is pure per-request time-to-first-audio overhead for a worker
+    /// that keeps one voice loaded. Mirrors build_input_embeddings_with_icl;
+    /// keep the two in sync.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_icl_prompt_cache(
+        &self,
+        ref_text_token_ids: &[i64],
+        ref_codes: &[Vec<i64>],
+        speaker_embedding: &Tensor,
+        language_id: Option<i64>,
+        tts_pad_id: i64,
+        tts_bos_id: i64,
+        tts_eos_id: i64,
+        codec_think_id: i64,
+        codec_nothink_id: i64,
+        codec_think_bos_id: i64,
+        codec_think_eos_id: i64,
+        codec_pad_id: i64,
+        codec_bos_id: i64,
+    ) -> IclPromptCache {
+        // Phase 1: role prefix.
+        let role_embed = self.embed_text(&ref_text_token_ids[..3]);
+
+        // Phase 2: codec prefix with x-vector.
+        let tts_embeds = self.embed_text(&[tts_bos_id, tts_eos_id, tts_pad_id]);
+        let tts_bos_embed = tts_embeds.narrow(1, 0, 1);
+        let tts_eos_embed = tts_embeds.narrow(1, 1, 1);
+        let tts_pad_embed = tts_embeds.narrow(1, 2, 1);
+
+        let codec_prefill = if let Some(language_id) = language_id {
+            vec![
+                codec_think_id,
+                codec_think_bos_id,
+                language_id,
+                codec_think_eos_id,
+            ]
+        } else {
+            vec![codec_nothink_id, codec_think_bos_id, codec_think_eos_id]
+        };
+        let codec_tokens_before_speaker = self.embed_codec(&codec_prefill);
+
+        let spk_embed = speaker_embedding.to_device(self.device);
+        let spk_embed = if spk_embed.dim() == 1 {
+            spk_embed.unsqueeze(0).unsqueeze(0)
+        } else if spk_embed.dim() == 2 {
+            spk_embed.unsqueeze(0)
+        } else {
+            spk_embed
+        };
+
+        let codec_tokens_after_speaker = self.embed_codec(&[codec_pad_id, codec_bos_id]);
+        let codec_prefix = Tensor::cat(
+            &[
+                codec_tokens_before_speaker,
+                spk_embed,
+                codec_tokens_after_speaker,
+            ],
+            1,
+        );
+
+        let prefix_positions = codec_prefix.size()[1] - 1;
+        let pad_count = prefix_positions - 1;
+        let tts_pad_prefix = tts_pad_embed.expand(&[1, pad_count, self.hidden_size], false);
+        let text_for_codec = Tensor::cat(&[tts_pad_prefix, tts_bos_embed], 1);
+        let codec_prefix_without_bos = codec_prefix.narrow(1, 0, prefix_positions);
+        let phase2 = &text_for_codec + &codec_prefix_without_bos;
+
+        // Reference share of phase 3. Embeddings are per-token, so embedding
+        // reference and synthesis text separately and concatenating later is
+        // equivalent to embedding their concatenation.
+        let ref_pure = &ref_text_token_ids[3..ref_text_token_ids.len().saturating_sub(2)];
+        let ref_text_embed = self.embed_text(ref_pure);
+
+        // Phase 4: codec_bos + reference codec frame embeddings.
+        let codec_pad_embed = self.embed_codec(&[codec_pad_id]);
+        let codec_bos_embed = self.embed_codec(&[codec_bos_id]);
+        let mut ref_codec_embeds = Vec::new();
+        for frame_codes in ref_codes {
+            let mut frame_embed = if let Some(&code0) = frame_codes.first() {
+                let code0_ids = Tensor::from_slice_i64(&[code0]).to_device(self.device);
+                self.codec_embedding
+                    .index_select(0, &code0_ids)
+                    .unsqueeze(0)
+            } else {
+                Tensor::zeros(&[1, 1, self.hidden_size], DType::BFloat16, self.device)
+            };
+            for (i, &code) in frame_codes.iter().enumerate().skip(1) {
+                if i - 1 < self.code_predictor.code_embeddings.len() {
+                    let code_ids = Tensor::from_slice_i64(&[code]).to_device(self.device);
+                    let code_embed = self.code_predictor.code_embeddings[i - 1]
+                        .index_select(0, &code_ids)
+                        .unsqueeze(0);
+                    frame_embed = &frame_embed + &code_embed;
+                }
+            }
+            ref_codec_embeds.push(frame_embed);
+        }
+        let ref_codec_embed_sum = Tensor::cat(&ref_codec_embeds, 1);
+        let codec_stream = Tensor::cat(&[codec_bos_embed, ref_codec_embed_sum], 1);
+        let phase4 = add_tensors_as_rounded_bf16_values(&codec_stream, &tts_pad_embed);
+
+        // Pay the (lazy) device cost now rather than on the first request.
+        for tensor in [&role_embed, &phase2, &ref_text_embed, &phase4] {
+            tensor.eval();
+        }
+
+        IclPromptCache {
+            role_embed,
+            phase2,
+            ref_text_embed,
+            tts_eos_embed,
+            codec_pad_embed,
+            phase4,
+        }
+    }
+
+    /// Assemble the full ICL input embeddings for one request from a prompt
+    /// cache plus this request's synthesis tokens. Produces the same sequence
+    /// as build_input_embeddings_with_icl for the cached reference.
+    pub fn build_input_embeddings_from_icl_cache(
+        &self,
+        cache: &IclPromptCache,
+        synth_text_token_ids: &[i64],
+    ) -> Tensor {
+        let synth_pure = &synth_text_token_ids[3..synth_text_token_ids.len().saturating_sub(5)];
+        let synth_embed = self.embed_text(synth_pure);
+        let text_embed = Tensor::cat(
+            &[
+                cache.ref_text_embed.shallow_clone(),
+                synth_embed,
+                cache.tts_eos_embed.shallow_clone(),
+            ],
+            1,
+        );
+        let phase3 = add_tensors_as_rounded_bf16_values(&text_embed, &cache.codec_pad_embed);
+        Tensor::cat(
+            &[
+                cache.role_embed.shallow_clone(),
+                cache.phase2.shallow_clone(),
+                phase3,
+                cache.phase4.shallow_clone(),
+            ],
+            1,
+        )
+    }
+
     /// Run the transformer forward pass on embeddings.
     /// Returns NORMED hidden states (used for both codec_head and code predictor).
     fn forward_embeds_with_cache(
@@ -2775,6 +2924,155 @@ impl TTSInference {
         println!("Generated {} streamed code frames", generated);
         Ok(())
     }
+
+    /// Precompute per-voice ICL state (prompt cache, pad embedding, token ids)
+    /// so repeated requests against one reference voice skip the reference
+    /// prompt rebuild entirely.
+    pub fn prepare_icl_session(
+        &self,
+        ref_text: &str,
+        ref_codes: &[Vec<i64>],
+        speaker_embedding: &Tensor,
+        language: &str,
+    ) -> Result<IclSession> {
+        let language_id = self
+            .config
+            .talker_config
+            .codec_language_id
+            .as_ref()
+            .and_then(|map| map.get(&language.to_lowercase()))
+            .copied()
+            .map(i64::from);
+
+        let im_start = self.config.im_start_token_id as i64;
+        let im_end = self.config.im_end_token_id as i64;
+        let assistant_id = self.config.assistant_token_id as i64;
+        let newline_tokens = self.tokenize("\n")?;
+        let newline_id = newline_tokens.first().copied().unwrap_or(198) as i64;
+
+        let ref_text_tokens = self.tokenize(ref_text)?;
+        let ref_text_ids: Vec<i64> = ref_text_tokens.iter().map(|&id| id as i64).collect();
+        let mut ref_token_ids = vec![im_start, assistant_id, newline_id];
+        ref_token_ids.extend_from_slice(&ref_text_ids);
+        ref_token_ids.extend_from_slice(&[im_end, newline_id]);
+
+        let talker_config = &self.config.talker_config;
+        let prompt_cache = self.talker.build_icl_prompt_cache(
+            &ref_token_ids,
+            ref_codes,
+            speaker_embedding,
+            language_id,
+            self.config.tts_pad_token_id as i64,
+            self.config.tts_bos_token_id as i64,
+            self.config.tts_eos_token_id as i64,
+            talker_config.codec_think_id as i64,
+            talker_config.codec_nothink_id as i64,
+            talker_config.codec_think_bos_id as i64,
+            talker_config.codec_think_eos_id as i64,
+            talker_config.codec_pad_id as i64,
+            talker_config.codec_bos_id as i64,
+        );
+        let tts_pad_embed = self
+            .talker
+            .embed_text(&[self.config.tts_pad_token_id as i64]);
+        tts_pad_embed.eval();
+
+        Ok(IclSession {
+            prompt_cache,
+            tts_pad_embed,
+            codec_eos_id: talker_config.codec_eos_token_id as i64,
+            im_start,
+            im_end,
+            assistant_id,
+            newline_id,
+        })
+    }
+
+    /// Streaming ICL synthesis against a prepared session. Behaviorally
+    /// identical to generate_with_icl_streaming for the session's reference,
+    /// minus the per-request reference prompt construction.
+    pub fn generate_with_icl_session_streaming<F>(
+        &self,
+        session: &IclSession,
+        text: &str,
+        temperature: f64,
+        top_k: i64,
+        max_codes: i64,
+        chunk_size: usize,
+        mut on_audio: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&[f32], u32) -> bool,
+    {
+        let synth_tokens = self.tokenize(text)?;
+        let synth_ids: Vec<i64> = synth_tokens.iter().map(|&id| id as i64).collect();
+        let mut synth_token_ids = vec![session.im_start, session.assistant_id, session.newline_id];
+        synth_token_ids.extend_from_slice(&synth_ids);
+        synth_token_ids.extend_from_slice(&[
+            session.im_end,
+            session.newline_id,
+            session.im_start,
+            session.assistant_id,
+            session.newline_id,
+        ]);
+
+        let input_embeddings = self
+            .talker
+            .build_input_embeddings_from_icl_cache(&session.prompt_cache, &synth_token_ids);
+
+        let sample_rate = 24000u32;
+        let mut should_continue = true;
+        let mut vocoder_state = self
+            .vocoder
+            .as_ref()
+            .map(|vocoder| vocoder.streaming_state());
+        self.talker.generate_codes_streaming(
+            &input_embeddings,
+            max_codes,
+            temperature,
+            top_k,
+            session.codec_eos_id,
+            &session.tts_pad_embed,
+            chunk_size,
+            |code_chunk| {
+                if !should_continue || code_chunk.is_empty() {
+                    return should_continue;
+                }
+                let waveform = if let Some(state) = vocoder_state.as_mut() {
+                    self.decode_codes_to_audio_streaming(code_chunk, state)
+                } else {
+                    self.decode_codes_to_audio(code_chunk)
+                };
+                if let Some(waveform) = waveform {
+                    should_continue = on_audio(&waveform, sample_rate);
+                }
+                should_continue
+            },
+        );
+        Ok(())
+    }
+}
+
+/// Synthesis-independent, precomputed embeddings for one ICL reference voice.
+/// See Talker::build_icl_prompt_cache.
+pub struct IclPromptCache {
+    role_embed: Tensor,
+    phase2: Tensor,
+    ref_text_embed: Tensor,
+    tts_eos_embed: Tensor,
+    codec_pad_embed: Tensor,
+    phase4: Tensor,
+}
+
+/// Per-voice state for repeated streaming ICL requests.
+pub struct IclSession {
+    prompt_cache: IclPromptCache,
+    tts_pad_embed: Tensor,
+    codec_eos_id: i64,
+    im_start: i64,
+    im_end: i64,
+    assistant_id: i64,
+    newline_id: i64,
 }
 
 #[cfg(test)]

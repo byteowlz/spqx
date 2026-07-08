@@ -9,7 +9,7 @@
 use clap::Parser;
 use qwen3_tts_rs::audio::{load_wav_file, resample, write_wav_file};
 use qwen3_tts_rs::audio_encoder::AudioEncoder;
-use qwen3_tts_rs::inference::TTSInference;
+use qwen3_tts_rs::inference::{IclSession, TTSInference};
 use qwen3_tts_rs::speaker_encoder::SpeakerEncoder;
 use qwen3_tts_rs::tensor::{Device, Tensor};
 use serde_json::json;
@@ -205,6 +205,7 @@ impl BinaryWriter {
 struct Worker {
     model_name: String,
     inference: TTSInference,
+    icl_session: IclSession,
     speaker_embedding: Tensor,
     ref_codes: Vec<Vec<i64>>,
     ref_text: String,
@@ -254,14 +255,20 @@ impl Worker {
         };
         let speaker_embedding = speaker_encoder.extract_embedding(&samples)?;
         let ref_codes = audio_encoder.encode(&samples)?;
+        let language = normalize_language(&args.language);
+        // Precompute the reference side of the ICL prompt once; requests only
+        // pay for their own synthesis tokens.
+        let icl_session =
+            inference.prepare_icl_session(&ref_text, &ref_codes, &speaker_embedding, &language)?;
 
         Ok(Self {
             model_name: model_path.display().to_string(),
             inference,
+            icl_session,
             speaker_embedding,
             ref_codes,
             ref_text,
-            language: normalize_language(&args.language),
+            language,
             temperature: args.temperature,
             top_k: args.top_k,
             max_new_tokens: args.max_new_tokens,
@@ -332,12 +339,9 @@ impl Worker {
         let mut stream_error: Option<anyhow::Error> = None;
         let mut cancelled_during_stream = false;
 
-        self.inference.generate_with_icl_streaming(
+        self.inference.generate_with_icl_session_streaming(
+            &self.icl_session,
             text,
-            &self.ref_text,
-            &self.ref_codes,
-            &self.speaker_embedding,
-            &self.language,
             self.temperature,
             self.top_k,
             self.max_new_tokens,
@@ -347,14 +351,27 @@ impl Worker {
                     cancelled_during_stream = true;
                     return false;
                 }
-                if !ttfa_logged {
+                let faded;
+                let samples: &[f32] = if ttfa_logged {
+                    samples
+                } else {
                     log_json(json!({
                         "type": "ttfa",
                         "seconds": round3(started.elapsed().as_secs_f64()),
                         "label": "voice_clone_rust"
                     }));
                     ttfa_logged = true;
-                }
+                    // The vocoder starts from zeroed causal-conv state, which
+                    // can put a DC step at sample 0 that plays as a pop. A
+                    // short linear fade-in on the first chunk removes it.
+                    let mut buffer = samples.to_vec();
+                    let fade = (sample_rate as usize * 5 / 1000).min(buffer.len());
+                    for (i, sample) in buffer.iter_mut().take(fade).enumerate() {
+                        *sample *= i as f32 / fade as f32;
+                    }
+                    faded = buffer;
+                    &faded
+                };
                 if let Err(error) = streamer.push(samples, sample_rate, request_id, writer) {
                     stream_error = Some(error);
                     return false;
