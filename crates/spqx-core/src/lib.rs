@@ -103,6 +103,7 @@ pub mod tokenizer;
 pub mod types;
 pub mod vocoder;
 pub mod weights;
+pub mod worker;
 
 // Re-export main types at crate root for convenience
 pub use audio::AudioInput;

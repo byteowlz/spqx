@@ -10,6 +10,7 @@ mod engine;
 mod paths;
 mod playback;
 mod say;
+mod serve;
 mod voices;
 
 use std::io::Write;
@@ -67,6 +68,8 @@ enum Command {
     Say(say::SayArgs),
     /// Manage the named voice registry
     Voices(voices::VoicesArgs),
+    /// Run the binary-framed worker protocol on stdin/stdout
+    Serve(serve::ServeArgs),
     /// Inspect and manage configuration
     Config {
         #[command(subcommand)]
@@ -100,6 +103,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Say(args) => say::run(args, &cli.common),
         Command::Voices(args) => voices::run(args, &cli.common),
+        Command::Serve(args) => serve::run(args, &cli.common),
         Command::Config { command } => run_config(command, &cli.common),
         Command::Completions { shell } => {
             let mut cmd = Cli::command();
