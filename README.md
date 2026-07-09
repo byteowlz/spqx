@@ -4,7 +4,7 @@ Fast Qwen3-TTS inference in Rust with an Apple Silicon MLX backend: streaming,
 in-context voice cloning, quantized models, and a persistent worker protocol
 built for real-time voice runtimes. Built on top of Mario's fork of
 [qwen3_tts_rs](https://github.com/badlogic/qwen3_tts_rs); spqx is the default
-TTS engine of [foxline](https://github.com/byteowlz/foxline).
+TTS engine of [foxline](https://github.com/WismutHansen/foxline).
 
 Measured against the reference Python MLX stack (`mlx_audio` via
 `speech-to-speech`) on the same machine, same model
@@ -20,7 +20,7 @@ Measured against the reference Python MLX stack (`mlx_audio` via
 The 0.3s model load makes per-session workers and instant voice switching
 practical.
 
-## Why it is fast (and correct)
+## Why it is fast
 
 - Everything decode-side runs on device with one GPU sync per audio frame:
   device-chained sub-code sampling, on-device repetition penalty, cached RoPE
@@ -138,6 +138,27 @@ Cloning quality is bounded by the reference recording. Hard-won guidelines:
 - Scan for isolated clicks (spike over near-silence) — the clone reproduces
   reference artifacts as voice mannerisms.
 - After changing a reference, generate a round and ASR-check the first words.
+
+## Benchmarking
+
+`spqx say --json` reports the core latency metrics for one synthesis run:
+time to first audio (`ttfa_ms`), generated audio duration (`audio_s`), wall
+clock time (`wall_s`), and real-time factor (`rtf`). Use
+`scripts/benchmark_spqx.sh` to repeat runs and capture process resource metrics
+from `/usr/bin/time`:
+
+```bash
+scripts/benchmark_spqx.sh --voice demo --runs 10 -- "Hello from spqx."
+scripts/benchmark_spqx.sh --ref-audio ref.wav --ref-text-file ref.txt --runs 10 -- "Benchmark text."
+```
+
+The script writes `results.jsonl`, per-run WAV files, `/usr/bin/time` output,
+a `summary.txt` when `jq` is installed, and a self-contained `report.html` when
+`uv` is available. For a polished demo, open the report next to Finder/QuickTime
+and play one of the generated WAV files while showing TTFA, RTF, and memory.
+Hardware counters such as Metal GPU power require separate system tools
+(`powermetrics`, Instruments, or Activity Monitor) because the CLI process
+metrics only cover CPU-side resource use.
 
 ## Python/Rust parity tools
 

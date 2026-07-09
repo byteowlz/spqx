@@ -57,9 +57,9 @@ impl Default for ModelConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct VoiceConfig {
-    /// Registry voice name (see `spqx voices`) or a CustomVoice preset
-    /// speaker (serena, vivian, uncle_fu, ryan, aiden, ono_anna, sohee,
-    /// eric, dylan).
+    /// Registry voice name (see `spqx voices`). The Base model clones from a
+    /// registry reference; the embedded default voices (af_/am_/bf_/bm_) are
+    /// seeded on first run so this resolves out of the box.
     pub default: String,
     /// Default language passed to the engine (`auto` detects).
     pub language: String,
@@ -68,7 +68,7 @@ pub struct VoiceConfig {
 impl Default for VoiceConfig {
     fn default() -> Self {
         Self {
-            default: "aiden".to_string(),
+            default: "af_heart".to_string(),
             language: "auto".to_string(),
         }
     }
