@@ -79,7 +79,7 @@ cargo build --release -p spqx-core --no-default-features --features mlx --bin sp
 
 ## Usage
 
-Persistent worker (what [foxline](https://github.com/byteowlz/foxline)'s
+Persistent worker (what [foxline](https://github.com/WismutHansen/foxline)'s
 `rust-mlx` TTS backend launches):
 
 ```bash
