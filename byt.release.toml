@@ -1,0 +1,10 @@
+# Only `checksums`/`publish`/`packages` from `byt release` are used here (see
+# .github/workflows/release.yml) — NOT `byt release build`/`run`. spqx's
+# backends (mlx / tch-backend) are mutually exclusive Cargo features that pick
+# different binaries per platform, which byt's build step can't express (it
+# has no per-target feature flags), so the workflow stages its own tarball and
+# only hands off to byt at the checksums/GitHub-release boundary, matching how
+# oqto stays "bespoke-but-conformant". See wiki/projects/byteowlz-release-pipeline.md.
+[release]
+name = "spqx"
+lang = "rust"
