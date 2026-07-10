@@ -92,7 +92,6 @@ jobs:
       - name: Checksums + GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REF_NAME: ${{ inputs.tag || github.ref_name }}
         run: |
           byt release checksums
-          byt release publish
+          byt release publish --tag "${{ inputs.tag || github.ref_name }}"
