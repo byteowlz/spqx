@@ -38,6 +38,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install build dependencies (autotools for audiopus_sys)
+        run: brew install automake autoconf libtool
+
       - name: Resolve version
         id: ver
         run: |
