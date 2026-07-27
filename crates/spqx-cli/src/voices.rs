@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
-use spqx_core::audio::{load_wav_file, resample, write_wav_file};
+use spqx_core::audio::{load_audio_file, resample, write_wav_file};
 
 use crate::config::Config;
 use crate::{engine, CommonOpts};
@@ -44,8 +44,8 @@ enum VoicesCommand {
 struct AddArgs {
     /// Voice name (used as `--voice <name>`)
     name: String,
-    /// Reference WAV recording
-    #[arg(long, value_name = "WAV")]
+    /// Reference audio recording (WAV, MP3, FLAC, OGG/Vorbis, M4A/AAC)
+    #[arg(long, value_name = "AUDIO")]
     ref_audio: PathBuf,
     /// Reference transcript
     #[arg(long, value_name = "TEXT")]
@@ -182,7 +182,7 @@ fn add_voice(dir: &Path, add: AddArgs, common: &CommonOpts) -> Result<()> {
     }
 
     let src = add.ref_audio.to_str().context("ref path not UTF-8")?;
-    let (samples, sr) = load_wav_file(src)
+    let (samples, sr) = load_audio_file(src)
         .with_context(|| format!("reading reference audio {}", add.ref_audio.display()))?;
     let seconds = samples.len() as f64 / sr as f64;
 

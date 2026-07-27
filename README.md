@@ -139,6 +139,22 @@ Cloning quality is bounded by the reference recording. Hard-won guidelines:
   reference artifacts as voice mannerisms.
 - After changing a reference, generate a round and ASR-check the first words.
 
+An experimental wrapper can select a transcript-aligned 6-12 second clip using
+[`trnscrb`](../trnscrb):
+
+```bash
+scripts/prepare_voice_reference.sh -o prepared --play recording.wav
+# The script writes and plays prepared/reference.wav; then enroll it:
+spqx voices add demo --ref-audio prepared/reference.wav \
+  --ref-text-file prepared/reference.txt
+```
+
+The wrapper requires `trnscrb`, `jq`, `ffmpeg`, and `ffprobe`. It defaults to
+the Parakeet backend, writes a mono 24 kHz WAV, and records its selection in
+`preparation.json`. Pass `--transcript /path/to/transcript.json` to reuse an
+existing trnscrb transcript without running transcription again. This is an
+MVP: always listen to the selected clip before enrollment.
+
 ## Benchmarking
 
 `spqx say --json` reports the core latency metrics for one synthesis run:

@@ -11,6 +11,14 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use hound::{WavReader, WavSpec, WavWriter};
 use rubato::{FftFixedIn, Resampler};
 use std::io::Cursor;
+use std::path::Path as StdPath;
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::errors;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
 use url::Url;
 
 /// Supported audio input types.
@@ -144,6 +152,111 @@ pub fn load_wav_file(path: &str) -> Result<(Vec<f32>, u32)> {
     Ok((samples, sample_rate))
 }
 
+/// Load audio from a file path, returning mono f32 samples at the file's
+/// native sample rate.
+///
+/// WAV files are routed through [`load_wav_file`] (hound) to preserve the
+/// exact existing behaviour. Every other container symphonia understands —
+/// MP3, FLAC, OGG/Vorbis, M4A/AAC, and friends — is decoded here and downmixed
+/// to mono. This lets `spqx voices add` and voice cloning accept reference
+/// audio in the formats users actually have, without a system ffmpeg.
+///
+/// Resampling to a target rate is the caller's job (see [`resample`] or
+/// [`load_audio`]).
+pub fn load_audio_file(path: &str) -> Result<(Vec<f32>, u32)> {
+    let is_wav = StdPath::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("wav"))
+        .unwrap_or(false);
+    if is_wav {
+        return load_wav_file(path);
+    }
+    decode_with_symphonia(path)
+}
+
+/// Decode a non-WAV audio file with symphonia, returning mono f32 samples and
+/// the native sample rate.
+fn decode_with_symphonia(path: &str) -> Result<(Vec<f32>, u32)> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| Qwen3TTSError::Audio(format!("Failed to open audio file '{path}': {e}")))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = StdPath::new(path).extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let prober = symphonia::default::get_probe();
+    let mut format = prober
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| {
+            Qwen3TTSError::Audio(format!("Could not identify audio format for '{path}': {e}"))
+        })?
+        .format;
+
+    let track = format
+        .default_track()
+        .ok_or_else(|| Qwen3TTSError::Audio(format!("No audio track found in '{path}'")))?
+        .clone();
+
+    let sample_rate = track.codec_params.sample_rate.ok_or_else(|| {
+        Qwen3TTSError::Audio(format!("Audio track in '{path}' has no sample rate"))
+    })?;
+    let channels = track
+        .codec_params
+        .channels
+        .map(|c| c.count())
+        .unwrap_or(1);
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| {
+            Qwen3TTSError::Audio(format!(
+                "Unsupported audio codec in '{path}': {e}"
+            ))
+        })?;
+
+    let mut interleaved: Vec<f32> = Vec::new();
+    while let Ok(packet) = format.next_packet() {
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            // Skip a single corrupt frame and keep decoding the rest.
+            Err(errors::Error::DecodeError(_)) => continue,
+            Err(e) => {
+                return Err(Qwen3TTSError::Audio(format!("Decode error in '{path}': {e}")))
+            }
+        };
+        let spec = decoded.spec().clone();
+        let mut buf = SampleBuffer::<f32>::new(decoded.frames() as u64, spec);
+        buf.copy_interleaved_ref(decoded);
+        interleaved.extend_from_slice(buf.samples());
+    }
+
+    if interleaved.is_empty() {
+        return Err(Qwen3TTSError::Audio(format!(
+            "Decoded no samples from '{path}' (empty or unsupported file?)"
+        )));
+    }
+
+    // Symphonia hands back interleaved frames; downmix to mono.
+    let mono = if channels > 1 {
+        interleaved
+            .chunks(channels)
+            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+            .collect()
+    } else {
+        interleaved
+    };
+
+    Ok((mono, sample_rate))
+}
+
 /// Load audio from WAV bytes.
 pub fn load_wav_bytes(bytes: &[u8]) -> Result<(Vec<f32>, u32)> {
     let cursor = Cursor::new(bytes);
@@ -193,7 +306,7 @@ pub fn fetch_audio_from_url(_url: &str) -> Result<Vec<u8>> {
 /// Load audio from an AudioInput, resampling to the target sample rate.
 pub fn load_audio(input: AudioInput, target_sr: u32) -> Result<Vec<f32>> {
     let (samples, source_sr) = match input {
-        AudioInput::FilePath(path) => load_wav_file(&path)?,
+        AudioInput::FilePath(path) => load_audio_file(&path)?,
         AudioInput::Base64(b64) => {
             let bytes = decode_base64_to_bytes(&b64)?;
             load_wav_bytes(&bytes)?
