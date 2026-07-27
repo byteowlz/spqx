@@ -142,6 +142,9 @@ pub struct SynthStats {
     pub wall_s: f64,
     pub audio_s: f64,
     pub sample_rate: u32,
+    /// False when generation hit the frame cap instead of emitting EOS, which
+    /// means the utterance is cut off mid-sentence.
+    pub eos_reached: bool,
 }
 
 /// Load the model, build an ICL session for `reference`, and stream synthesis
@@ -200,7 +203,7 @@ pub fn synthesize_streaming(
     let mut first = true;
     let mut audio_samples = 0usize;
 
-    inference.generate_with_icl_session_streaming(
+    let stop = inference.generate_with_icl_session_streaming(
         &session,
         text,
         config.sampling.temperature,
@@ -229,6 +232,7 @@ pub fn synthesize_streaming(
         wall_s: started.elapsed().as_secs_f64(),
         audio_s: audio_samples as f64 / sample_rate as f64,
         sample_rate,
+        eos_reached: !stop.truncated(),
     })
 }
 

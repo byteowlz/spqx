@@ -219,7 +219,7 @@ impl Worker {
         let mut stream_error: Option<anyhow::Error> = None;
         let mut cancelled_during_stream = false;
 
-        self.inference.generate_with_icl_session_streaming(
+        let stop = self.inference.generate_with_icl_session_streaming(
             &self.icl_session,
             text,
             self.temperature,
@@ -269,16 +269,29 @@ impl Worker {
 
         let elapsed = started.elapsed().as_secs_f64();
         let audio_seconds = streamer.audio_samples as f64 / self.output_sample_rate as f64;
+        let trailing_s = streamer.trailing_nonspeech_seconds();
         log_json(json!({
             "type": "generated",
             "seconds": round3(elapsed),
             "audioSeconds": round3(audio_seconds),
             "rtf": round3(audio_seconds / elapsed.max(f64::EPSILON)),
+            "stop": stop.as_str(),
+            "trailingSilenceSeconds": round3(trailing_s),
             "label": "voice_clone_rust"
         }));
-        writer.write_frame(WORKER_OUTPUT_AUDIO_DONE, request_id, &[])?;
         clear_cancelled(cancelled, request_id);
         clear_mlx_cache();
+
+        // The audio is already streamed, so this cannot un-send it — but the
+        // caller must not treat a truncated or collapsed utterance as a
+        // complete one. Both failures are silent otherwise: the model stops
+        // speaking and the run still looks successful.
+        if let Some(reason) = degenerate_reason(stop, trailing_s) {
+            log_json(json!({ "type": "degenerate", "reason": reason }));
+            writer.write_frame(WORKER_OUTPUT_ERROR, request_id, reason.as_bytes())?;
+            return Ok(());
+        }
+        writer.write_frame(WORKER_OUTPUT_AUDIO_DONE, request_id, &[])?;
         Ok(())
     }
 }
@@ -289,9 +302,16 @@ struct PcmStreamer {
     found_speech: bool,
     leftover: Vec<i16>,
     audio_samples: usize,
+    /// Rolling window of the most recent output, kept so the end of the
+    /// utterance can be inspected after streaming. Bounded because a
+    /// collapsed generation can run for minutes.
+    tail: Vec<i16>,
 }
 
 impl PcmStreamer {
+    /// Longer than any tail worth reporting, short enough to stay cheap.
+    const TAIL_SECONDS: usize = 30;
+
     fn new(output_sample_rate: u32, blocksize: usize) -> Self {
         Self {
             output_sample_rate,
@@ -299,7 +319,25 @@ impl PcmStreamer {
             found_speech: false,
             leftover: Vec::new(),
             audio_samples: 0,
+            tail: Vec::new(),
         }
+    }
+
+    fn remember_tail(&mut self, chunk: &[i16]) {
+        self.tail.extend_from_slice(chunk);
+        let cap = self.output_sample_rate as usize * Self::TAIL_SECONDS;
+        if self.tail.len() > cap {
+            self.tail.drain(0..self.tail.len() - cap);
+        }
+    }
+
+    fn trailing_nonspeech_seconds(&self) -> f64 {
+        let floats: Vec<f32> = self
+            .tail
+            .iter()
+            .map(|s| *s as f32 / i16::MAX as f32)
+            .collect();
+        crate::postprocess::trailing_nonspeech_seconds(&floats, self.output_sample_rate)
     }
 
     fn push(
@@ -343,6 +381,7 @@ impl PcmStreamer {
         let complete = (pcm.len() / self.blocksize) * self.blocksize;
         for chunk in pcm[..complete].chunks(self.blocksize) {
             self.audio_samples += chunk.len();
+            self.remember_tail(chunk);
             writer.write_frame(WORKER_OUTPUT_AUDIO_CHUNK, request_id, &i16_bytes(chunk))?;
         }
         self.leftover = pcm[complete..].to_vec();
@@ -356,6 +395,7 @@ impl PcmStreamer {
         self.audio_samples += self.leftover.len();
         let mut chunk = std::mem::take(&mut self.leftover);
         chunk.resize(self.blocksize, 0);
+        self.remember_tail(&chunk);
         writer.write_frame(WORKER_OUTPUT_AUDIO_CHUNK, request_id, &i16_bytes(&chunk))?;
         Ok(())
     }
@@ -560,6 +600,29 @@ pub fn normalize_language(language: &str) -> String {
 
 fn log_json(value: serde_json::Value) {
     eprintln!("{value}");
+}
+
+/// Whether a finished generation should be reported as failed.
+///
+/// `CapReached` means no EOS, so the utterance is cut off. A long silent tail
+/// means the model stopped speaking but kept emitting frames. Both produce a
+/// WAV that looks fine to the caller.
+fn degenerate_reason(stop: crate::inference::Stop, trailing_s: f64) -> Option<String> {
+    const MAX_TRAILING_S: f64 = 3.0;
+    if stop.truncated() {
+        return Some(
+            "generation hit the frame cap without reaching EOS; the utterance is truncated \
+             — split the text into shorter segments"
+                .to_string(),
+        );
+    }
+    if trailing_s > MAX_TRAILING_S {
+        return Some(format!(
+            "generation collapsed: {trailing_s:.1}s of trailing non-speech — split the text \
+             into shorter segments"
+        ));
+    }
+    None
 }
 
 fn clear_mlx_cache() {

@@ -1358,7 +1358,7 @@ impl TalkerModel {
         tts_pad_embed: &Tensor,
     ) -> Vec<Vec<i64>> {
         let mut all_codes = Vec::new();
-        self.generate_codes_streaming(
+        let _ = self.generate_codes_streaming(
             input_embeddings,
             max_codes,
             temperature,
@@ -1498,10 +1498,11 @@ impl TalkerModel {
         tts_pad_embed: &Tensor,
         chunk_size: usize,
         mut on_chunk: F,
-    ) -> Vec<Vec<i64>>
+    ) -> (Vec<Vec<i64>>, Stop)
     where
         F: FnMut(&[Vec<i64>]) -> bool,
     {
+        let mut stop = Stop::CapReached;
         // Python parity: mlx_audio bumps the penalty to max(p, 1.5) for ICL
         // voice cloning "to prevent code degeneration with long reference
         // audio prefills". This engine's only shipped path is ICL cloning.
@@ -1562,6 +1563,7 @@ impl TalkerModel {
 
             if code_0 == eos_code {
                 println!("  EOS detected at step {}", step);
+                stop = Stop::Eos;
                 break;
             }
 
@@ -1609,6 +1611,7 @@ impl TalkerModel {
 
             if pending_codes.len() >= chunk_size {
                 if !on_chunk(&pending_codes) {
+                    stop = Stop::Cancelled;
                     break;
                 }
                 pending_codes.clear();
@@ -1623,7 +1626,31 @@ impl TalkerModel {
             on_chunk(&pending_codes);
         }
 
-        all_codes
+        (all_codes, stop)
+    }
+}
+
+/// Why a generation loop stopped. `CapReached` means the model never emitted
+/// EOS, so the audio is cut off mid-utterance and typically decays into
+/// silence or noise — callers must treat it as a failure, not a short result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    Eos,
+    CapReached,
+    Cancelled,
+}
+
+impl Stop {
+    pub fn truncated(self) -> bool {
+        self == Stop::CapReached
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stop::Eos => "eos",
+            Stop::CapReached => "cap_reached",
+            Stop::Cancelled => "cancelled",
+        }
     }
 }
 
@@ -2952,7 +2979,7 @@ impl TTSInference {
         max_codes: i64,
         chunk_size: usize,
         mut on_audio: F,
-    ) -> Result<()>
+    ) -> Result<Stop>
     where
         F: FnMut(&[f32], u32) -> bool,
     {
@@ -3047,7 +3074,7 @@ impl TTSInference {
             .vocoder
             .as_ref()
             .map(|vocoder| vocoder.streaming_state());
-        self.talker.generate_codes_streaming(
+        let (_, stop) = self.talker.generate_codes_streaming(
             &input_embeddings,
             max_codes,
             temperature,
@@ -3076,7 +3103,7 @@ impl TTSInference {
             },
         );
         println!("Generated {} streamed code frames", generated);
-        Ok(())
+        Ok(stop)
     }
 
     /// Precompute per-voice ICL state (prompt cache, pad embedding, token ids)
@@ -3168,7 +3195,7 @@ impl TTSInference {
         max_codes: i64,
         chunk_size: usize,
         mut on_audio: F,
-    ) -> Result<()>
+    ) -> Result<Stop>
     where
         F: FnMut(&[f32], u32) -> bool,
     {
@@ -3201,7 +3228,7 @@ impl TTSInference {
             .warm_vocoder_state
             .clone()
             .or_else(|| self.vocoder.as_ref().map(|vocoder| vocoder.streaming_state()));
-        self.talker.generate_codes_streaming(
+        let (_, stop) = self.talker.generate_codes_streaming(
             &input_embeddings,
             effective_max_codes,
             temperature,
@@ -3224,7 +3251,7 @@ impl TTSInference {
                 should_continue
             },
         );
-        Ok(())
+        Ok(stop)
     }
 }
 

@@ -91,3 +91,98 @@ pub fn gate_leading_nonspeech(samples: &mut [f32], sample_rate: u32) {
         *sample *= i as f32 / fade.max(1) as f32;
     }
 }
+
+/// Seconds of non-speech at the end of a finished utterance.
+///
+/// A generation that loses coherence stops producing speech but keeps
+/// emitting frames, so the tail decays to digital silence or a low noise
+/// floor while the run still looks successful. Measuring that tail is how
+/// callers detect it. Uses the same block/level basis as
+/// [`gate_leading_nonspeech`], with the noise floor rather than true zero as
+/// the threshold, because the observed failure leaves low-level junk behind.
+pub fn trailing_nonspeech_seconds(samples: &[f32], sample_rate: u32) -> f64 {
+    const BLOCK_MS: usize = 5;
+    const SPEECH_LEVEL: f32 = 0.02;
+    if samples.is_empty() || sample_rate == 0 {
+        return 0.0;
+    }
+    let block = (sample_rate as usize * BLOCK_MS / 1000).max(1);
+    let mut quiet_samples = 0usize;
+    for chunk in samples.chunks(block).rev() {
+        let peak = chunk.iter().fold(0f32, |acc, s| acc.max(s.abs()));
+        if peak > SPEECH_LEVEL {
+            break;
+        }
+        quiet_samples += chunk.len();
+    }
+    quiet_samples as f64 / sample_rate as f64
+}
+
+/// Drop a degenerate trailing tail, keeping a short natural release.
+///
+/// Returns the seconds removed. Only trims when the tail is longer than
+/// `keep_s`, so normal utterance endings are untouched.
+pub fn trim_trailing_nonspeech(samples: &mut Vec<f32>, sample_rate: u32, keep_s: f64) -> f64 {
+    let tail = trailing_nonspeech_seconds(samples, sample_rate);
+    if tail <= keep_s {
+        return 0.0;
+    }
+    let removed = tail - keep_s;
+    let new_len = samples
+        .len()
+        .saturating_sub((removed * sample_rate as f64) as usize);
+    samples.truncate(new_len);
+    removed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tone(seconds: f64, sample_rate: u32) -> Vec<f32> {
+        (0..(seconds * sample_rate as f64) as usize)
+            .map(|i| (i as f32 / 20.0).sin() * 0.5)
+            .collect()
+    }
+
+    #[test]
+    fn trailing_silence_is_measured() {
+        let sr = 24000;
+        let mut samples = tone(1.0, sr);
+        samples.extend(std::iter::repeat(0.0).take(sr as usize * 2));
+        let tail = trailing_nonspeech_seconds(&samples, sr);
+        assert!((tail - 2.0).abs() < 0.05, "expected ~2s tail, got {tail}");
+    }
+
+    #[test]
+    fn low_noise_floor_counts_as_nonspeech() {
+        // The observed failure decays to low-level junk, not true zero.
+        let sr = 24000;
+        let mut samples = tone(1.0, sr);
+        samples.extend((0..sr as usize).map(|i| if i % 7 == 0 { 0.003 } else { -0.002 }));
+        let tail = trailing_nonspeech_seconds(&samples, sr);
+        assert!((tail - 1.0).abs() < 0.05, "expected ~1s tail, got {tail}");
+    }
+
+    #[test]
+    fn normal_ending_is_not_trimmed() {
+        let sr = 24000;
+        let mut samples = tone(1.0, sr);
+        samples.extend(std::iter::repeat(0.0).take(sr as usize / 10));
+        let before = samples.len();
+        let removed = trim_trailing_nonspeech(&mut samples, sr, 0.5);
+        assert_eq!(removed, 0.0);
+        assert_eq!(samples.len(), before);
+    }
+
+    #[test]
+    fn degenerate_tail_is_trimmed_to_keep_window() {
+        let sr = 24000;
+        let mut samples = tone(1.0, sr);
+        samples.extend(std::iter::repeat(0.0).take(sr as usize * 10));
+        let removed = trim_trailing_nonspeech(&mut samples, sr, 0.5);
+        assert!((removed - 9.5).abs() < 0.05, "removed {removed}");
+        let tail = trailing_nonspeech_seconds(&samples, sr);
+        assert!((tail - 0.5).abs() < 0.05, "tail {tail}");
+    }
+}

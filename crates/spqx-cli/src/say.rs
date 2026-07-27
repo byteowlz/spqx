@@ -83,6 +83,14 @@ pub fn run(args: SayArgs, common: &CommonOpts) -> Result<()> {
         player.wait();
     }
 
+    // A collapsed generation stops speaking but keeps emitting frames, so the
+    // tail is silence the user never asked for. Drop it before writing.
+    let trailing_s = spqx_core::postprocess::trailing_nonspeech_seconds(
+        &wav_samples,
+        stats.sample_rate,
+    );
+    spqx_core::postprocess::trim_trailing_nonspeech(&mut wav_samples, stats.sample_rate, 0.5);
+
     let wav_path = if let Some(out) = &args.out {
         let out = resolve_out(&config, out);
         if let Some(parent) = out.parent() {
@@ -99,8 +107,28 @@ pub fn run(args: SayArgs, common: &CommonOpts) -> Result<()> {
     };
 
     report(common, &reference, &stats, wav_path.as_deref());
+
+    // Reported after the WAV is written so the partial audio is still
+    // inspectable, but the exit code must not claim success.
+    if !stats.eos_reached {
+        bail!(
+            "generation hit the frame cap without reaching EOS: the utterance is truncated. \
+             Split the text into shorter segments."
+        );
+    }
+    if trailing_s > MAX_TRAILING_S {
+        bail!(
+            "generation collapsed after {:.0}s: {trailing_s:.0}s of trailing non-speech. \
+             Split the text into shorter segments.",
+            stats.audio_s - trailing_s,
+        );
+    }
     Ok(())
 }
+
+/// Longer than a natural utterance release, shorter than any observed
+/// collapse (the shortest measured was 13s of trailing silence).
+const MAX_TRAILING_S: f64 = 3.0;
 
 fn report(
     common: &CommonOpts,
@@ -121,6 +149,7 @@ fn report(
             "wall_s": (stats.wall_s * 1000.0).round() / 1000.0,
             "rtf": (rtf * 1000.0).round() / 1000.0,
             "sample_rate": stats.sample_rate,
+            "eos_reached": stats.eos_reached,
             "wav": wav_path.map(|p| p.display().to_string()),
         });
         println!("{}", serde_json::to_string(&obj).unwrap_or_default());
