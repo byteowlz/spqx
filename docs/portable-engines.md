@@ -6,7 +6,7 @@ One CLI and worker contract, different whole-pipeline engines. Apple Silicon kee
 
 - Apple Silicon: default CLI/core `cargo check` passed. Existing MLX reference preparation moved behind a shared session; no new MLX model inference was claimed for this change.
 - Linux x86-64: portable-only Rust build and model-free tests passed. Real GGML CUDA English/German generation, active cancellation, queued-request fencing, recovery after malformed input, CLI JSON/WAV output, and rejection of an unavailable device passed with synthetic references. Explicit CPU inference completed using both the CUDA-capable runtime and a separately built, relocated CPU-only runtime with no CUDA/libtorch dependencies.
-- Windows: CRT binary mode, Win32 stdout-handle synchronization, native DLL search policy and a model-free CI matrix are implemented. The workflow has not yet run here; Windows native inference/bundles are **not qualified**.
+- Windows x86-64: MSVC portable CLI/worker and all 23 model-free tests passed on a CPU-only Windows 11 VM (8 vCPUs, 16 GiB RAM). The pinned AVX2 CPU DLLs built, actual English/German CLI JSON/WAV and worker PCM generation passed, as did cancellation, queued-request fencing and malformed-input recovery. A repeatable opt-in native test passed. GPU execution, ARM64, playback and distributable bundles remain unqualified; the hosted workflow itself has not been run.
 - Vulkan, GGML Metal, Linux ARM64 and Intel Mac inference remain untested. A device name or upstream build option is not deployment proof.
 
 Generated speech has not received an independent listening/ASR quality review. Cancellation acknowledgement is not audible playback cessation. These checks are integration evidence, not a latency benchmark or full adoption approval.
@@ -37,6 +37,24 @@ just runtime cpu target/spqx-runtime-cpu
 The Bash helper clones pinned source only when needed, never downloads models, never changes services, and refuses mixed/reused output directories. `SPQX_QWENTTS_SOURCE` may name an already initialized clean pinned checkout; `SPQX_BUILD_JOBS` defaults to 2. Keep all generated native libraries together in `lib/`, along with source/license metadata. This is a developer build helper, not a finished Windows installer or redistribution-license clearance. Audit all bundled code, weights and audio dependencies separately before publishing packages.
 
 Default library discovery checks only the executable directory and its `lib/` or `runtime/` subdirectory. Otherwise select a trusted library explicitly. Windows additionally limits dependency lookup to safe DLL search directories. Native code is not sandboxed.
+
+### Native Windows CPU build and acceptance
+
+Use an x64 Visual Studio developer command prompt with CMake and Ninja on PATH. No execution-policy or service changes are required. Prepare a clean qwentts.cpp checkout at the exact source/submodule revisions above, then:
+
+```text
+just runtime-windows-cpu C:/src/qwentts.cpp C:/build/qwen-cpu
+```
+
+Keep `qwen.dll`, `ggml.dll`, `ggml-base.dll` and `ggml-cpu.dll` together. The tested build disables OpenMP/BLAS and uses AVX2; `GGML_NATIVE=OFF` does not by itself establish compatibility with older non-AVX2 CPUs. MSVC runtime dependency/redistribution requirements remain part of release qualification.
+
+For the opt-in end-to-end test, prepare an absolute `SPQX_TEST_ASSETS` directory with `models/` containing the tested pair below, `references/{en,de}.{wav,txt}` containing lawful synthetic references and matching UTF-8 transcripts, and `runtime/lib/` containing the native CPU libraries. `SPQX_TEST_OUTPUT` optionally names a fresh output directory for WAVs/logs.
+
+```text
+just test-native-cpu
+```
+
+The test uses a native pipe-reader thread rather than POSIX-only pipe selectors. It enforces frame bounds, readiness, 24 kHz PCM, request IDs, cancellation/recovery and owned-child cleanup. No download or model inference occurs in the default model-free suite. This test is integration evidence, not broad language-quality or audible-playback verification. The observed VM CLI runs were slower than real time; cancellation terminal timing is not audio-device cessation.
 
 ## Assets and configuration
 
@@ -76,4 +94,4 @@ Standalone `spqx-tts-worker` accepts `--backend`, `--device`, `--engine-library`
 
 The 9-byte frame protocol, request IDs, mono PCM16 and error/done frames are unchanged. GGML prepares reference latents once and polls cancellation on its compute thread. The native GGML chunk ramp differs from MLX's fixed frame policy. GGML frame-cap detection is conservative: reaching the cap is an error even if EOS coincides exactly with it; the pinned ABI does not return a distinct EOS reason. CLI generation now uses the same 1,536-frame ceiling as the worker and fails on truncation rather than claiming completion.
 
-Remaining gates: release-qualified CPU-only/CUDA/Vulkan runtime bundles, Windows native execution and binary framing, actual MLX regression synthesis, platform installers, dependency/license manifests, failure-injection coverage and speech-quality review. Track engine integration in `spqx-srtg.1`, packaging in `spqx-z9ng`, and runtime adoption in `spqx-wzrp`.
+Remaining gates: release-qualified CPU-only/CUDA/Vulkan runtime bundles, Windows GPU/ARM64 and clean-machine/runtime dependency testing, actual MLX regression synthesis, platform installers, dependency/license manifests, failure-injection coverage and speech-quality review. Track engine integration in `spqx-srtg.1`, packaging in `spqx-z9ng`, and runtime adoption in `spqx-wzrp`.
