@@ -4,12 +4,12 @@
 //! Standalone MLX-backed Qwen3-TTS CLI with timings comparable to qwen3-tts.cpp.
 
 use clap::Parser;
+use serde_json::json;
 use spqx_core::audio::{load_wav_file, resample, write_wav_file};
 use spqx_core::audio_encoder::AudioEncoder;
 use spqx_core::inference::TTSInference;
 use spqx_core::speaker_encoder::SpeakerEncoder;
 use spqx_core::tensor::Device;
-use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -416,7 +416,7 @@ fn round3(value: f64) -> f64 {
 }
 
 fn init_backend() {
-    #[cfg(feature = "mlx")]
+    #[cfg(spqx_mlx)]
     {
         spqx_core::backend::mlx::stream::init_mlx(true);
         println!("MLX backend initialized (Metal GPU)");
@@ -424,7 +424,7 @@ fn init_backend() {
 }
 
 fn clear_mlx_cache() {
-    #[cfg(feature = "mlx")]
+    #[cfg(spqx_mlx)]
     unsafe {
         spqx_core::backend::mlx::ffi::mlx_clear_cache();
     }

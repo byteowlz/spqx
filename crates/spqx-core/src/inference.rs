@@ -182,8 +182,14 @@ impl CodePredictor {
         top_k: i64,
         caches: &mut [KVCache],
     ) -> Vec<i64> {
-        self.generate_codes_with_embed_sum(main_hidden, code_0_embedding, temperature, top_k, caches)
-            .0
+        self.generate_codes_with_embed_sum(
+            main_hidden,
+            code_0_embedding,
+            temperature,
+            top_k,
+            caches,
+        )
+        .0
     }
 
     /// Like generate_codes, but also returns the sum of the sampled codes'
@@ -1307,8 +1313,7 @@ impl TalkerModel {
             let mask = Tensor::from_slice_f32(&mask)
                 .reshape(&logits.size())
                 .to_device(self.device);
-            let penalized =
-                (&logits / repetition_penalty).minimum(&(&logits * repetition_penalty));
+            let penalized = (&logits / repetition_penalty).minimum(&(&logits * repetition_penalty));
             logits = &logits + (&penalized - &logits) * &mask;
         }
 
@@ -1623,7 +1628,8 @@ impl TalkerModel {
         }
 
         if !pending_codes.is_empty() {
-            on_chunk(&pending_codes);
+            // A final partial chunk can reject output after EOS was observed.
+            stop = stop.after_callback(on_chunk(&pending_codes));
         }
 
         (all_codes, stop)
@@ -1633,26 +1639,7 @@ impl TalkerModel {
 /// Why a generation loop stopped. `CapReached` means the model never emitted
 /// EOS, so the audio is cut off mid-utterance and typically decays into
 /// silence or noise — callers must treat it as a failure, not a short result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stop {
-    Eos,
-    CapReached,
-    Cancelled,
-}
-
-impl Stop {
-    pub fn truncated(self) -> bool {
-        self == Stop::CapReached
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Stop::Eos => "eos",
-            Stop::CapReached => "cap_reached",
-            Stop::Cancelled => "cancelled",
-        }
-    }
-}
+pub use crate::synthesis::Stop;
 
 /// TTS Inference engine.
 /// Timed non-streaming TTS output.
@@ -3224,10 +3211,11 @@ impl TTSInference {
 
         let sample_rate = 24000u32;
         let mut should_continue = true;
-        let mut vocoder_state = session
-            .warm_vocoder_state
-            .clone()
-            .or_else(|| self.vocoder.as_ref().map(|vocoder| vocoder.streaming_state()));
+        let mut vocoder_state = session.warm_vocoder_state.clone().or_else(|| {
+            self.vocoder
+                .as_ref()
+                .map(|vocoder| vocoder.streaming_state())
+        });
         let (_, stop) = self.talker.generate_codes_streaming(
             &input_embeddings,
             effective_max_codes,
@@ -3290,7 +3278,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "mlx"))]
+#[cfg(all(test, spqx_mlx))]
 mod penalty_tests {
     use crate::tensor::{DType, Device, Tensor};
 

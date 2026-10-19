@@ -1,0 +1,106 @@
+//! Model-free CLI and binary-stdout regressions, including Windows CRT paths.
+use std::{
+    path::PathBuf,
+    process::{Command, Stdio},
+    sync::atomic::{AtomicUsize, Ordering},
+};
+static NEXT: AtomicUsize = AtomicUsize::new(0);
+struct Scratch(PathBuf);
+impl Scratch {
+    fn new() -> Self {
+        let p = std::env::temp_dir().join(format!(
+            "spqx-portable-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&p).unwrap();
+        Self(p)
+    }
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_spqx"));
+        for key in [
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+            "APPDATA",
+            "LOCALAPPDATA",
+        ] {
+            cmd.env(key, &self.0);
+        }
+        for key in [
+            "SPQX_CONFIG",
+            "SPQX_BACKEND",
+            "SPQX_DEVICE",
+            "SPQX_CODEC",
+            "SPQX_ENGINE_LIBRARY",
+        ] {
+            cmd.env_remove(key);
+        }
+        cmd
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+#[test]
+fn engine_flags_override_config_and_json_stays_clean() {
+    let scratch = Scratch::new();
+    let output = scratch
+        .command()
+        .args([
+            "--json",
+            "--backend",
+            "ggml",
+            "--device",
+            "cpu",
+            "config",
+            "show",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["engine"]["backend"], "ggml");
+    assert_eq!(value["engine"]["device"], "cpu");
+}
+#[cfg(feature = "qwentts")]
+#[test]
+fn startup_error_is_one_binary_frame_not_engine_chatter() {
+    let scratch = Scratch::new();
+    let model = scratch.0.join("model");
+    std::fs::create_dir(&model).unwrap();
+    std::fs::write(model.join("qwen-talker-0.6b-base-Q8_0.gguf"), []).unwrap();
+    std::fs::write(model.join("qwen-tokenizer-12hz-F32.gguf"), []).unwrap();
+    let wav = scratch.0.join("synthetic.wav");
+    spqx_core::audio::write_wav_file(wav.to_str().unwrap(), &[0.0; 240], 24000).unwrap();
+    let value = serde_json::json!({"model":{"path":model},"engine":{"backend":"ggml","device":"cpu","library":scratch.0.join("missing-native-runtime")}});
+    let config = scratch.0.join("config.toml");
+    std::fs::write(&config, toml::to_string(&value).unwrap()).unwrap();
+    let output = scratch
+        .command()
+        .arg("--config")
+        .arg(config)
+        .args(["serve", "--ref-audio"])
+        .arg(wav)
+        .args(["--ref-text", "Synthetic fixture."])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.len() > 9, "{:?}", output);
+    let bytes = &output.stdout;
+    assert_eq!(bytes[0], 5);
+    assert_eq!(&bytes[1..5], &[0; 4]);
+    let len = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
+    assert_eq!(bytes.len(), 9 + len);
+    assert!(std::str::from_utf8(&bytes[9..])
+        .unwrap()
+        .contains("loading"));
+}

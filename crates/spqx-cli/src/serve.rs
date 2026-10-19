@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 use clap::Args;
 use spqx_core::worker::{self, WorkerConfig};
 
-use crate::config::Config;
 use crate::engine;
 use crate::CommonOpts;
 
@@ -34,7 +33,7 @@ pub struct ServeArgs {
 }
 
 pub fn run(args: ServeArgs, common: &CommonOpts) -> Result<()> {
-    let config = Config::load(common.config.as_deref())?;
+    let config = common.load_config()?;
     let reference = engine::resolve_reference(
         &config,
         args.voice.as_deref(),
@@ -59,5 +58,6 @@ pub fn run(args: ServeArgs, common: &CommonOpts) -> Result<()> {
         streaming_chunk_size: 4,
     };
 
-    worker::run_stdio(worker_config).context("running the spqx worker")
+    worker::run_stdio_with_engine(worker_config, config.engine.clone())
+        .context("running the spqx worker")
 }

@@ -5,8 +5,15 @@
 // 2. Emits linker directives for mlx-c, MLX, Metal, and system frameworks
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(spqx_mlx)");
+    let apple_silicon = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
+        && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64");
     #[cfg(feature = "mlx")]
-    build_mlx();
+    if apple_silicon {
+        println!("cargo:rustc-cfg=spqx_mlx");
+        build_mlx();
+    }
+    let _ = apple_silicon;
 }
 
 #[cfg(feature = "mlx")]

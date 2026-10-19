@@ -22,6 +22,8 @@ use crate::paths;
 pub struct Config {
     /// Model selection.
     pub model: ModelConfig,
+    /// Whole-pipeline engine and explicit compute device selection.
+    pub engine: spqx_core::synthesis::EngineOptions,
     /// Default voice used by `say`/`read` when `--voice` is not given.
     pub voice: VoiceConfig,
     /// Audio output settings.
@@ -47,7 +49,12 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            id: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit".to_string(),
+            id: if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit"
+            } else {
+                "Serveurperso/Qwen3-TTS-GGUF"
+            }
+            .to_string(),
             path: None,
         }
     }

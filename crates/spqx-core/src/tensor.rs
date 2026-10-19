@@ -59,7 +59,7 @@ impl From<tch::Kind> for DType {
     }
 }
 
-#[cfg(feature = "mlx")]
+#[cfg(spqx_mlx)]
 impl From<DType> for crate::backend::mlx::ffi::mlx_dtype {
     fn from(dt: DType) -> Self {
         use crate::backend::mlx::ffi::mlx_dtype::*;
@@ -74,7 +74,7 @@ impl From<DType> for crate::backend::mlx::ffi::mlx_dtype {
     }
 }
 
-#[cfg(feature = "mlx")]
+#[cfg(spqx_mlx)]
 impl From<crate::backend::mlx::ffi::mlx_dtype> for DType {
     fn from(dt: crate::backend::mlx::ffi::mlx_dtype) -> Self {
         use crate::backend::mlx::ffi::mlx_dtype::*;
@@ -140,7 +140,7 @@ pub struct Tensor {
     #[cfg(feature = "tch-backend")]
     pub(crate) inner: tch::Tensor,
 
-    #[cfg(feature = "mlx")]
+    #[cfg(spqx_mlx)]
     pub(crate) inner: crate::backend::mlx::array::MlxArray,
 }
 
@@ -163,7 +163,7 @@ impl Clone for Tensor {
                 inner: self.inner.shallow_clone(),
             }
         }
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         {
             Tensor {
                 inner: self.inner.clone(),
@@ -642,7 +642,7 @@ impl Tensor {
 
 // ===== MLX backend implementation =====
 
-#[cfg(feature = "mlx")]
+#[cfg(spqx_mlx)]
 #[allow(missing_docs)]
 impl Tensor {
     /// Wrap an MlxArray.
@@ -1370,7 +1370,7 @@ impl std::ops::Add<&Tensor> for &Tensor {
         {
             Tensor::from_tch(&self.inner + &rhs.inner)
         }
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         {
             Tensor::from_mlx(crate::backend::mlx::ops::add(&self.inner, &rhs.inner))
         }
@@ -1406,7 +1406,7 @@ impl std::ops::Add<f64> for &Tensor {
         {
             Tensor::from_tch(&self.inner + rhs)
         }
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         {
             let scalar = crate::backend::mlx::array::MlxArray::scalar_f32(rhs as f32);
             Tensor::from_mlx(crate::backend::mlx::ops::add(&self.inner, &scalar))
@@ -1429,7 +1429,7 @@ impl std::ops::Sub<&Tensor> for &Tensor {
         {
             Tensor::from_tch(&self.inner - &rhs.inner)
         }
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         {
             Tensor::from_mlx(crate::backend::mlx::ops::subtract(&self.inner, &rhs.inner))
         }
@@ -1465,7 +1465,7 @@ impl std::ops::Mul<&Tensor> for &Tensor {
         {
             Tensor::from_tch(&self.inner * &rhs.inner)
         }
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         {
             Tensor::from_mlx(crate::backend::mlx::ops::multiply(&self.inner, &rhs.inner))
         }
@@ -1501,7 +1501,7 @@ impl std::ops::Mul<f64> for &Tensor {
         {
             Tensor::from_tch(&self.inner * rhs)
         }
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         {
             let scalar = crate::backend::mlx::array::MlxArray::scalar_f32(rhs as f32);
             Tensor::from_mlx(crate::backend::mlx::ops::multiply(&self.inner, &scalar))
@@ -1539,7 +1539,7 @@ impl std::ops::Div<&Tensor> for &Tensor {
         {
             Tensor::from_tch(&self.inner / &rhs.inner)
         }
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         {
             Tensor::from_mlx(crate::backend::mlx::ops::divide(&self.inner, &rhs.inner))
         }
@@ -1575,7 +1575,7 @@ impl std::ops::Div<f64> for &Tensor {
         {
             Tensor::from_tch(&self.inner / rhs)
         }
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         {
             let scalar = crate::backend::mlx::array::MlxArray::scalar_f32(rhs as f32);
             Tensor::from_mlx(crate::backend::mlx::ops::divide(&self.inner, &scalar))

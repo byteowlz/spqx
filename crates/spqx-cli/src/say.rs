@@ -37,7 +37,7 @@ pub struct SayArgs {
 }
 
 pub fn run(args: SayArgs, common: &CommonOpts) -> Result<()> {
-    let config = Config::load(common.config.as_deref())?;
+    let config = common.load_config()?;
 
     let text = match args.text.as_deref() {
         Some("-") | None => read_stdin()?,
@@ -61,8 +61,8 @@ pub fn run(args: SayArgs, common: &CommonOpts) -> Result<()> {
     // Playback runs on rodio's own thread, fed chunk-by-chunk over a channel.
     let (tx, player) = if play {
         let (tx, rx) = mpsc::channel::<Vec<f32>>();
-        let player = Player::start(rx, config.audio.sample_rate_hz)
-            .context("starting audio playback")?;
+        let player =
+            Player::start(rx, config.audio.sample_rate_hz).context("starting audio playback")?;
         (Some(tx), Some(player))
     } else {
         (None, None)
@@ -85,10 +85,8 @@ pub fn run(args: SayArgs, common: &CommonOpts) -> Result<()> {
 
     // A collapsed generation stops speaking but keeps emitting frames, so the
     // tail is silence the user never asked for. Drop it before writing.
-    let trailing_s = spqx_core::postprocess::trailing_nonspeech_seconds(
-        &wav_samples,
-        stats.sample_rate,
-    );
+    let trailing_s =
+        spqx_core::postprocess::trailing_nonspeech_seconds(&wav_samples, stats.sample_rate);
     spqx_core::postprocess::trim_trailing_nonspeech(&mut wav_samples, stats.sample_rate, 0.5);
 
     let wav_path = if let Some(out) = &args.out {

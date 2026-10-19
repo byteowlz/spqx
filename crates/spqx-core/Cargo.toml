@@ -1,5 +1,6 @@
 [package]
 name = "spqx-core"
+autobins = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -44,6 +45,8 @@ url = "2.5"
 # Error handling
 thiserror = "2.0"
 anyhow = "1.0"
+libloading = { version = "0.8", optional = true }
+schemars = "0.8"
 
 # Logging
 tracing = "0.1"
@@ -58,12 +61,20 @@ tower-http = { version = "0.6", features = ["trace"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
-default = ["tch-backend"]
-# Use libtorch/PyTorch as the computation backend (default)
+default = ["mlx", "qwentts"]
+# Whole-pipeline portable runtime, loaded from a pinned native library.
+qwentts = ["dep:libloading"]
+# Legacy tensor-level diagnostic/example binaries.
+legacy-tools = []
+# Optional legacy dense libtorch/PyTorch tensor backend.
 tch-backend = ["dep:tch"]
 # Use Apple MLX as the computation backend (macOS Apple Silicon only).
 # Requires the mlx-c git submodule: `git submodule update --init --recursive`
 mlx = []
+
+[[example]]
+name = "test_weights"
+required-features = ["legacy-tools"]
 
 [build-dependencies]
 cmake = "0.1"
@@ -71,14 +82,17 @@ cmake = "0.1"
 [[bin]]
 name = "tts"
 path = "src/bin/tts.rs"
+required-features = ["legacy-tools"]
 
 [[bin]]
 name = "voice_clone"
 path = "src/bin/voice_clone.rs"
+required-features = ["legacy-tools"]
 
 [[bin]]
 name = "api_server"
 path = "src/bin/api_server.rs"
+required-features = ["legacy-tools"]
 
 [[bin]]
 name = "spqx-tts-worker"
@@ -92,10 +106,17 @@ path = "src/bin/worker.rs"
 [[bin]]
 name = "qwen3-tts"
 path = "src/bin/qwen3_tts_cli.rs"
+required-features = ["legacy-tools"]
 
 [[bin]]
 name = "trace_vocoder"
 path = "src/bin/trace_vocoder.rs"
+required-features = ["legacy-tools"]
+
+[[bin]]
+name = "trace_rust"
+path = "src/bin/trace_rust.rs"
+required-features = ["legacy-tools"]
 
 [dev-dependencies]
 tempfile = "3.14"

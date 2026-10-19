@@ -48,7 +48,7 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
-    #[cfg(feature = "mlx")]
+    #[cfg(spqx_mlx)]
     {
         spqx_core::backend::mlx::stream::init_mlx(true);
     }

@@ -1,116 +1,86 @@
 // Copyright 2026 Claude Code on behalf of Michael Yuan.
 // SPDX-License-Identifier: Apache-2.0
 
-//! # Qwen3 TTS - Rust Port
+//! Local Qwen synthesis with prepared whole-pipeline sessions.
 //!
-//! A Rust implementation of the Qwen3 Text-to-Speech (TTS) model.
+//! MLX is effective on Apple Silicon; the optional qwentts engine loads a pinned
+//! GGML runtime for portable desktop/server execution. Device availability,
+//! native packaging and speech quality require separate target validation.
 //!
-//! This crate provides a high-level API for generating speech from text using
-//! the Qwen3 TTS model family, which includes:
-//!
-//! - **CustomVoice**: Use predefined speaker voices
-//! - **VoiceDesign**: Control voice characteristics with natural language
-//! - **Base (VoiceClone)**: Clone voices from reference audio
-//!
-//! ## Quick Start
-//!
-//! ```ignore
-//! use spqx_core::{Qwen3TTSModel, Language, Speaker};
-//!
-//! // Load a pretrained model
-//! let model = Qwen3TTSModel::from_pretrained("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")?;
-//!
-//! // Generate speech with a predefined speaker
-//! let output = model.generate_custom_voice(
-//!     "Hello, welcome to Qwen TTS!",
-//!     Speaker::new("Vivian"),
-//!     Language::English,
-//!     None,
-//!     None,
-//! )?;
-//!
-//! // Save the output
-//! spqx_core::audio::write_wav_file("output.wav", &output.waveforms[0], output.sample_rate)?;
+//! ```no_run
+//! use std::path::Path;
+//! use spqx_core::synthesis::{EngineOptions, Sampling, Session};
+//! # fn main() -> anyhow::Result<()> {
+//! let session = Session::load(Path::new("model.gguf"), Path::new("reference.wav"),
+//!     "The matching reference transcript.", "english", &EngineOptions::default())?;
+//! let sampling = Sampling { temperature: 0.9, top_k: 50,
+//!     max_new_tokens: 384, chunk_size: 4 };
+//! let stop = session.synthesize("Hello.", &sampling,
+//!     |pcm, rate| { /* deliver mono f32 samples at rate */ true }, || false)?;
+//! assert!(!stop.truncated());
+//! # Ok(())
+//! # }
 //! ```
 //!
-//! ## Voice Cloning (ICL)
-//!
-//! Voice cloning uses ICL (in-context learning) mode, which encodes the reference
-//! audio into codec tokens and conditions generation on both the audio and its
-//! text transcript. This works with any model that includes a `speech_tokenizer/`.
-//!
-//! ```ignore
-//! use spqx_core::{Qwen3TTSModel, AudioInput, Language};
-//!
-//! let model = Qwen3TTSModel::from_pretrained("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")?;
-//!
-//! // Clone voice from reference audio (requires transcript)
-//! let output = model.generate_voice_clone(
-//!     "This is synthesized in the cloned voice.",
-//!     Language::English,
-//!     AudioInput::from("reference.wav"),
-//!     Some("This is the reference transcript."),
-//!     None,
-//! )?;
-//! ```
-//!
-//! ## Voice Design
-//!
-//! ```ignore
-//! use spqx_core::{Qwen3TTSModel, Language, VoiceInstruction};
-//!
-//! let model = Qwen3TTSModel::from_pretrained("Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign")?;
-//!
-//! // Design voice with natural language
-//! let output = model.generate_voice_design(
-//!     "Welcome to our service!",
-//!     VoiceInstruction::new("A warm, friendly female voice with moderate speed"),
-//!     Language::English,
-//!     None,
-//! )?;
-//! ```
-//!
-//! ## Features
-//!
-//! - `async`: Enable async support with tokio and reqwest for URL fetching
+//! CLI and framed worker share this session. Native tensor APIs are available
+//! with effective MLX or tch-backend; tensor diagnostic binaries additionally
+//! require legacy-tools. Model assets and runtime libraries remain separate.
+//! See docs/portable-engines.md for the current qualification matrix.
 
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_doc_code_examples)]
 
-// Ensure exactly one backend is selected
-#[cfg(all(feature = "tch-backend", feature = "mlx"))]
-compile_error!("Features 'tch-backend' and 'mlx' are mutually exclusive");
+// Tensor backends remain mutually exclusive; GGML is a whole-pipeline engine.
+#[cfg(all(feature = "tch-backend", spqx_mlx))]
+compile_error!("Features 'tch-backend' and effective MLX are mutually exclusive");
+#[cfg(not(any(feature = "tch-backend", spqx_mlx, feature = "qwentts")))]
+compile_error!("Enable qwentts, tch-backend, or MLX on Apple Silicon");
 
-#[cfg(not(any(feature = "tch-backend", feature = "mlx")))]
-compile_error!("Either 'tch-backend' or 'mlx' feature must be enabled");
-
-#[cfg(feature = "mlx")]
-pub mod backend;
-pub mod tensor;
-pub mod trace;
-
-pub mod api;
 pub mod audio;
-pub mod audio_encoder;
+#[cfg(spqx_mlx)]
+pub mod backend;
 pub mod config;
 pub mod error;
-pub mod inference;
-pub mod layers;
-pub mod model;
+#[cfg(feature = "qwentts")]
+mod ggml;
 pub mod postprocess;
-pub mod speaker_encoder;
-pub mod tokenizer;
-pub mod types;
-pub mod vocoder;
-pub mod weights;
+pub mod stdio;
+pub mod synthesis;
 pub mod worker;
 
-// Re-export main types at crate root for convenience
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
+pub mod api;
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
+pub mod audio_encoder;
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
+pub mod inference;
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
+pub mod layers;
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
+pub mod model;
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
+pub mod speaker_encoder;
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
+pub mod tensor;
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
+pub mod tokenizer;
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
+pub mod trace;
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
+pub mod types;
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
+pub mod vocoder;
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
+pub mod weights;
+
 pub use audio::AudioInput;
 pub use config::{GenerationConfig, Qwen3TTSConfig, TTSModelType, TokenizerType};
 pub use error::{Qwen3TTSError, Result};
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
 pub use model::{GenerationParams, Qwen3TTSModel};
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
 pub use tokenizer::Qwen3TTSTokenizer;
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
 pub use types::{
     DecodedAudio, EncodedAudio, GenerationOutput, Language, Speaker, VoiceClonePromptItem,
     VoiceInstruction,
@@ -136,6 +106,7 @@ mod tests {
         assert_eq!(DEFAULT_SAMPLE_RATE, 24000);
     }
 
+    #[cfg(any(spqx_mlx, feature = "tch-backend"))]
     #[test]
     fn test_language_conversion() {
         // Test that "english" and "EN" both convert to Language::English
@@ -155,6 +126,7 @@ mod tests {
         assert_eq!(lang.as_str(), "auto");
     }
 
+    #[cfg(any(spqx_mlx, feature = "tch-backend"))]
     #[test]
     fn test_speaker_creation() {
         let speaker = Speaker::new("Vivian");

@@ -65,15 +65,15 @@ jobs:
         env:
           LIBTORCH: ${{ github.workspace }}/libtorch
           LIBTORCH_BYPASS_VERSION_CHECK: "1"
-        run: cargo build --release
+        run: cargo build --release --no-default-features --features spqx-core/tch-backend,spqx-cli/tch,spqx-core/legacy-tools
 
       - name: Build (MLX)
         if: matrix.backend == 'mlx'
-        run: cargo build --release --no-default-features --features mlx
+        run: cargo build --release --no-default-features --features mlx,legacy-tools,playback
 
       - name: Build examples
         if: matrix.backend == 'tch'
         env:
           LIBTORCH: ${{ github.workspace }}/libtorch
           LIBTORCH_BYPASS_VERSION_CHECK: "1"
-        run: cargo build --examples --release
+        run: cargo build --examples --release --no-default-features --features tch-backend,legacy-tools

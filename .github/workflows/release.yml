@@ -8,10 +8,10 @@
 # the checksums/GitHub-release boundary — the same "bespoke-but-conformant"
 # pattern oqto uses. See wiki/projects/byteowlz-release-pipeline.md.
 #
-# MLX only for now: the tch/CUDA backend needs a bundled libtorch runtime and
-# per-arch CUDA toolkit install (see the retired ci.yml/release.yml for how
-# painful that got). Add a build-linux job here once the candle backend
-# (spqx-srtg) removes that dependency.
+# Published artifacts remain macOS-only. The GGML whole-pipeline integration
+# removes libtorch from the portable source path, but Linux/Windows native
+# bundles, dependencies and license inventories still need qualification
+# (spqx-z9ng). Do not publish Rust-only binaries as complete GGML bundles.
 name: release
 
 on:
@@ -49,8 +49,8 @@ jobs:
 
       - name: Build (mlx)
         run: |
-          cargo build --release --no-default-features --features mlx --bin spqx
-          cargo build --release --no-default-features --features mlx --bin spqx-tts-worker
+          cargo build --release -p spqx-cli --no-default-features --features mlx,qwentts,playback --bin spqx
+          cargo build --release -p spqx-core --no-default-features --features mlx,qwentts --bin spqx-tts-worker
 
       - name: Stage artifact
         env:

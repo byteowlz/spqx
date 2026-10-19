@@ -54,7 +54,7 @@ pub enum Qwen3TTSError {
     Torch(#[from] tch::TchError),
 
     /// MLX backend error
-    #[cfg(feature = "mlx")]
+    #[cfg(spqx_mlx)]
     #[error("MLX error: {0}")]
     Mlx(String),
 
