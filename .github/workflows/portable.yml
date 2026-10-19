@@ -14,6 +14,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install macOS audio build dependencies
+        if: runner.os == 'macOS'
+        run: brew install automake autoconf libtool
       - name: Test portable-only Rust path without models or accelerator allocation
         run: cargo test --locked -p spqx-core -p spqx-cli --no-default-features --features qwentts --lib --bins --tests
       - name: Install Linux playback build dependency
