@@ -7,8 +7,10 @@
 - Make portable-only builds independent of MLX/libtorch/playback. Restrict effective MLX compilation to Apple Silicon; add cross-platform CRT framing and Windows stdout-handle synchronization.
 - Honor cancellation of native final partial audio chunks, including after EOS; check late cancellation before flushing worker buffers.
 - Bound CLI synthesis to 1,536 frames, propagate resampling failures, and treat truncated output as failure. Legacy tensor diagnostics/examples now require `legacy-tools` with their native engine feature.
-- Add model-free platform CI, protocol/config/stdout regressions, a pinned native-runtime build helper, and qualification notes in `docs/portable-engines.md`. Linux CUDA/CPU and Windows x64 CPU integration checks passed; runtime release bundles are not yet qualified.
+- Add model-free platform CI, protocol/config/stdout regressions, a pinned native-runtime build helper, and qualification notes in `docs/portable-engines.md`. Linux CUDA/CPU, Windows x64 CPU and actual integrated MLX English/German worker checks passed.
 
 - Verify Windows x64 CPU English/German synthesis, CLI JSON/WAV, cancellation/fencing and malformed-input recovery; add an opt-in cross-platform native-worker test and a Windows CPU build recipe. CPU-only VM results are functional proof, not real-time performance or playback qualification.
 
-Migration: standalone `--device` now defaults to `auto` and is honored rather than ignored. Existing MLX deployments that explicitly passed a CUDA compatibility value must select auto/Metal instead. Published release packaging remains macOS-only pending portable bundle qualification.
+- Add complete-bundle builders, relocation-test overrides, integrity manifests, installers and original dependency sources/notices. Release builds omit legacy encoding/API dependencies; the core library keeps them behind its default `legacy-api` compatibility feature. Include the exact MLX metallib rather than depending on the build tree. Models/recordings remain separate and are never implicitly installed.
+
+Migration: standalone `--device` now defaults to `auto` and is honored rather than ignored. Existing MLX deployments that explicitly passed a CUDA compatibility value must select auto/Metal instead. Release candidates now have explicit macOS MLX, Linux CPU/CUDA12-SM89 and Windows x64 CPU layouts; untested platforms and broader quality/playback are not implied.

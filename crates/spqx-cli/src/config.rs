@@ -65,8 +65,8 @@ impl Default for ModelConfig {
 #[serde(default)]
 pub struct VoiceConfig {
     /// Registry voice name (see `spqx voices`). The Base model clones from a
-    /// registry reference; the embedded default voices (af_/am_/bf_/bm_) are
-    /// seeded on first run so this resolves out of the box.
+    /// registry reference. Add a lawful reference with `voices add`, or pass
+    /// explicit --ref-audio/--ref-text-file; recordings are not bundled.
     pub default: String,
     /// Default language passed to the engine (`auto` detects).
     pub language: String,

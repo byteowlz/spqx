@@ -1,81 +1,24 @@
-# Bespoke release workflow (spqx doesn't fit byt's standard build step).
-#
-# byt's `release build` runs plain `cargo build --release --target <triple>`
-# with no per-target feature flags and no support for staging non-binary
-# artifacts. spqx's backends (mlx / tch-backend) are mutually exclusive Cargo
-# features that produce different binaries per platform, so this workflow
-# owns compiling + staging the tarball itself and only hands off to byt at
-# the checksums/GitHub-release boundary — the same "bespoke-but-conformant"
-# pattern oqto uses. See wiki/projects/byteowlz-release-pipeline.md.
-#
-# Published artifacts remain macOS-only. The GGML whole-pipeline integration
-# removes libtorch from the portable source path, but Linux/Windows native
-# bundles, dependencies and license inventories still need qualification
-# (spqx-z9ng). Do not publish Rust-only binaries as complete GGML bundles.
+# Native bundles are built/staged here; byt owns checksums and publishing.
+# No models/recordings are downloaded or redistributed. Hosted builds do not
+# establish model/GPU/playback qualification; see docs/portable-engines.md.
 name: release
-
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag (defaults to the triggering git tag)
-        required: false
+        description: Existing release tag
+        required: true
         type: string
-
 permissions:
   contents: write
-
 jobs:
-  build-macos:
-    name: build (aarch64-apple-darwin, mlx)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install build dependencies (autotools for audiopus_sys)
-        run: brew install automake autoconf libtool
-
-      - name: Resolve version
-        id: ver
-        run: |
-          TAG="${{ inputs.tag || github.ref_name }}"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Build (mlx)
-        run: |
-          cargo build --release -p spqx-cli --no-default-features --features mlx,qwentts,playback --bin spqx
-          cargo build --release -p spqx-core --no-default-features --features mlx,qwentts --bin spqx-tts-worker
-
-      - name: Stage artifact
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
-        run: |
-          set -euo pipefail
-          TRIPLE=aarch64-apple-darwin
-          STAGE="dist/release/spqx-v${VERSION}-${TRIPLE}"
-          mkdir -p "$STAGE/bin"
-          # Statically linked (mlx-c/MLX + Metal JIT baked in) — no sidecar
-          # files needed alongside the binaries.
-          cp target/release/spqx target/release/spqx-tts-worker "$STAGE/bin/"
-          [ -f README.md ] && cp README.md "$STAGE/"
-          [ -f LICENSE ] && cp LICENSE "$STAGE/"
-          tar -czf "dist/release/spqx-v${VERSION}-${TRIPLE}.tar.gz" -C dist/release "spqx-v${VERSION}-${TRIPLE}"
-          rm -rf "$STAGE"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist-macos
-          path: dist/release/*.tar.gz
-          if-no-files-found: error
+  bundles:
+    uses: ./.github/workflows/bundles.yml
 
   publish:
-    needs: build-macos
+    needs: bundles
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/byteowlz/byt:latest

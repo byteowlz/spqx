@@ -1,10 +1,10 @@
-# Portable engines: first integration
+# Portable engines
 
 One CLI and worker contract, different whole-pipeline engines. Apple Silicon keeps MLX; GGML supplies a libtorch-free path for other targets. Browser/mobile inference is not part of this change.
 
 ## Current evidence
 
-- Apple Silicon: default CLI/core `cargo check` passed. Existing MLX reference preparation moved behind a shared session; no new MLX model inference was claimed for this change.
+- Apple Silicon: actual integrated release-worker MLX English/German synthesis, cancellation, queued fencing and malformed-input recovery passed on an M4 Max. A second run passed with copied binaries/metallib and the entire original build tree hidden. Each model run used fresh admitted capacity; it was released afterward.
 - Linux x86-64: portable-only Rust build and model-free tests passed. Real GGML CUDA English/German generation, active cancellation, queued-request fencing, recovery after malformed input, CLI JSON/WAV output, and rejection of an unavailable device passed with synthetic references. Explicit CPU inference completed using both the CUDA-capable runtime and a separately built, relocated CPU-only runtime with no CUDA/libtorch dependencies.
 - Windows x86-64: MSVC portable CLI/worker and all 23 model-free tests passed on a CPU-only Windows 11 VM (8 vCPUs, 16 GiB RAM). The pinned AVX2 CPU DLLs built, actual English/German CLI JSON/WAV and worker PCM generation passed, as did cancellation, queued-request fencing and malformed-input recovery. A repeatable opt-in native test passed. GPU execution, ARM64, playback and distributable bundles remain unqualified; the hosted workflow itself has not been run.
 - Vulkan, GGML Metal, Linux ARM64 and Intel Mac inference remain untested. A device name or upstream build option is not deployment proof.
@@ -56,6 +56,18 @@ just test-native-cpu
 
 The test uses a native pipe-reader thread rather than POSIX-only pipe selectors. It enforces frame bounds, readiness, 24 kHz PCM, request IDs, cancellation/recovery and owned-child cleanup. No download or model inference occurs in the default model-free suite. This test is integration evidence, not broad language-quality or audible-playback verification. The observed VM CLI runs were slower than real time; cancellation terminal timing is not audio-device cessation.
 
+## Complete runtime bundles
+
+`bash scripts/build-bundle.sh <target> cpu|cuda|mlx` and `scripts\\build-bundle.cmd` (Windows x64 CPU) build explicit lean release features. They omit `legacy-api` and therefore legacy HTTP/LAME/Opus encoders and libtorch. Default core-library builds retain `legacy-api` for compatibility.
+
+Bundles contain the CLI/worker, matching native libraries or MLX metallib, installers, per-file hashes, original Rust crate sources/notices, native corresponding sources and vendor terms. CUDA includes unmodified CUDA runtime/cuBLAS redistributables, not drivers. Windows includes app-local release CRT DLLs from the licensed VS redistribution directory, not debug/runtime utility files. Windows release producers must have appropriate Visual Studio redistribution rights; end-user runtime terms alone are not a distributor grant. Source/build tooling is not a legal clearance service.
+
+`uv run --no-project scripts/package.py --verify <extracted-root>` checks the recorded files. `install.sh --bundle <archive>` verifies its adjacent `.sha256` and installs without replacing existing commands/configuration. Extracted Windows bundles use `install.cmd [destination]`. No installer changes services, PATH, execution policy, model files or reference recordings. A Linux wrapper sets only its process-local library path; do not run the `-real` executable directly. Use a fresh destination for side-by-side upgrades.
+
+The release workflow builds macOS ARM64 MLX, Linux x64 CPU/CUDA12-SM89 and Windows x64 CPU candidates with dependency/source inventories. It does not provision model weights or execute GPU inference. OS frameworks, Linux glibc/libstdc++/ALSA, Windows UCRT and NVIDIA drivers remain system dependencies. Deployment minimums are determined by the actual build host/ELF symbols, not the target triple alone. The existing Windows proof is a native VM/developer-toolchain environment, not a fresh Windows installation.
+
+For relocated acceptance, the opt-in test supports `SPQX_TEST_WORKER=<absolute copied worker>` and `SPQX_TEST_LIBRARY=auto` (GGML executable-relative discovery). On Apple Silicon, build `native_cpu` with `--features mlx,qwentts` and select the ignored `mlx_runtime_worker_contract` test, setting `SPQX_TEST_MODEL` to an explicit prepared MLX snapshot. Model execution requires fresh compute admission independently of compilation/packaging.
+
 ## Assets and configuration
 
 The tested Base model pair from `Serveurperso/Qwen3-TTS-GGUF` revision `b7ee2e8c7459c3bea99da23e3d178125a7d1713c` is:
@@ -94,4 +106,4 @@ Standalone `spqx-tts-worker` accepts `--backend`, `--device`, `--engine-library`
 
 The 9-byte frame protocol, request IDs, mono PCM16 and error/done frames are unchanged. GGML prepares reference latents once and polls cancellation on its compute thread. The native GGML chunk ramp differs from MLX's fixed frame policy. GGML frame-cap detection is conservative: reaching the cap is an error even if EOS coincides exactly with it; the pinned ABI does not return a distinct EOS reason. CLI generation now uses the same 1,536-frame ceiling as the worker and fails on truncation rather than claiming completion.
 
-Remaining gates: release-qualified CPU-only/CUDA/Vulkan runtime bundles, Windows GPU/ARM64 and clean-machine/runtime dependency testing, actual MLX regression synthesis, platform installers, dependency/license manifests, failure-injection coverage and speech-quality review. Track engine integration in `spqx-srtg.1`, packaging in `spqx-z9ng`, and runtime adoption in `spqx-wzrp`.
+Additional adoption gates: Vulkan/GGML Metal, Windows GPU/ARM64, non-AVX2 CPUs, independent speech-quality review and physical playback. Hosted builds establish compilation/integrity, not model/device qualification. Do not represent these as tested targets. Track engine integration in `spqx-srtg.1`, packaging in `spqx-z9ng`, and runtime adoption in `spqx-wzrp`.

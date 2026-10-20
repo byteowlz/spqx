@@ -34,29 +34,49 @@ fn read_frame(input: &mut impl Read) -> Result<Frame> {
         data,
     })
 }
-impl Worker {
-    fn start(root: &Path, language: &str, output: &Path) -> Result<Self> {
-        let library = if cfg!(windows) {
-            "qwen.dll"
-        } else if cfg!(target_os = "macos") {
-            "libqwen.dylib"
-        } else {
-            "libqwen.so"
-        };
-        let mut child = Command::new(env!("CARGO_BIN_EXE_spqx-tts-worker"))
-            .args([
-                "--serve",
-                "--backend",
-                "ggml",
-                "--device",
-                "cpu",
-                "--engine-library",
-            ])
-            .arg(root.join("runtime/lib").join(library))
-            .arg("--model-path")
-            .arg(root.join("models/qwen-talker-0.6b-base-Q8_0.gguf"))
+fn worker_command(root: &Path, backend: &str) -> Result<Command> {
+    let library = if cfg!(windows) {
+        "qwen.dll"
+    } else if cfg!(target_os = "macos") {
+        "libqwen.dylib"
+    } else {
+        "libqwen.so"
+    };
+    let worker = std::env::var_os("SPQX_TEST_WORKER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_spqx-tts-worker")));
+    let mut command = Command::new(worker);
+    command.args([
+        "--serve",
+        "--backend",
+        backend,
+        "--device",
+        if backend == "mlx" { "auto" } else { "cpu" },
+    ]);
+    let model = if backend == "mlx" {
+        PathBuf::from(std::env::var_os("SPQX_TEST_MODEL").context("set SPQX_TEST_MODEL for MLX")?)
+    } else {
+        let selected = std::env::var_os("SPQX_TEST_LIBRARY");
+        if selected.as_deref() != Some(std::ffi::OsStr::new("auto")) {
+            command.arg("--engine-library").arg(
+                selected
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| root.join("runtime/lib").join(library)),
+            );
+        }
+        command
             .arg("--codec")
-            .arg(root.join("models/qwen-tokenizer-12hz-F32.gguf"))
+            .arg(root.join("models/qwen-tokenizer-12hz-F32.gguf"));
+        root.join("models/qwen-talker-0.6b-base-Q8_0.gguf")
+    };
+    command.arg("--model-path").arg(model);
+    Ok(command)
+}
+
+impl Worker {
+    fn start(root: &Path, language: &str, output: &Path, backend: &str) -> Result<Self> {
+        let mut command = worker_command(root, backend)?;
+        let mut child = command
             .arg("--ref-audio")
             .arg(root.join(format!("references/{language}.wav")))
             .arg("--ref-text-file")
@@ -258,6 +278,17 @@ impl Audio {
 #[test]
 #[ignore = "requires explicitly prepared local CPU runtime, weights and lawful references"]
 fn cpu_runtime_worker_contract() -> Result<()> {
+    exercise_contract("ggml")
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "mlx"))]
+#[test]
+#[ignore = "explicit Metal admission and SPQX_TEST_MODEL required"]
+fn mlx_runtime_worker_contract() -> Result<()> {
+    exercise_contract("mlx")
+}
+
+fn exercise_contract(backend: &str) -> Result<()> {
     let root = PathBuf::from(std::env::var_os("SPQX_TEST_ASSETS").context("set SPQX_TEST_ASSETS")?);
     let temporary = tempfile::tempdir()?;
     let output = std::env::var_os("SPQX_TEST_OUTPUT")
@@ -268,7 +299,7 @@ fn cpu_runtime_worker_contract() -> Result<()> {
         ("en", "The speech engine is ready."),
         ("de", "Die Sprachausgabe ist bereit."),
     ] {
-        let mut worker = Worker::start(&root, language, &output)?;
+        let mut worker = Worker::start(&root, language, &output, backend)?;
         worker.speak(1, text, &output.join(format!("{language}.wav")))?;
         if language == "en" {
             worker.cancel_and_recover(&output)?;

@@ -30,9 +30,10 @@ out=$(cd -- "$out" && pwd)
 build="$out/build"
 flags=(-DQWEN_SHARED=ON -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=OFF
     -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_METAL=OFF -DGGML_NATIVE=OFF
+    -DGGML_OPENMP=OFF -DGGML_BLAS=OFF
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON)
 case "$backend" in
-    cuda) flags+=(-DGGML_CUDA=ON);;
+    cuda) flags+=(-DGGML_CUDA=ON); if [[ -n ${SPQX_CUDA_ARCHITECTURES:-} ]]; then flags+=("-DCMAKE_CUDA_ARCHITECTURES=$SPQX_CUDA_ARCHITECTURES"); fi;;
     vulkan) flags+=(-DGGML_VULKAN=ON);;
     metal) flags+=(-DGGML_METAL=ON);;
 esac

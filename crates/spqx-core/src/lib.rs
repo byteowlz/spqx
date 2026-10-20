@@ -48,7 +48,7 @@ pub mod stdio;
 pub mod synthesis;
 pub mod worker;
 
-#[cfg(any(spqx_mlx, feature = "tch-backend"))]
+#[cfg(all(feature = "legacy-api", any(spqx_mlx, feature = "tch-backend")))]
 pub mod api;
 #[cfg(any(spqx_mlx, feature = "tch-backend"))]
 pub mod audio_encoder;

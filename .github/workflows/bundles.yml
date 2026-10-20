@@ -1,0 +1,116 @@
+name: Portable Runtime Bundles
+on:
+  workflow_call:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            backend: mlx
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            backend: cpu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            backend: cpu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v6
+      - uses: Swatinem/rust-cache@v2
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - name: macOS compiler dependencies
+        if: runner.os == 'macOS'
+        run: brew install cmake automake autoconf libtool
+      - name: Linux playback build headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build pkg-config libasound2-dev
+      - name: Model-free bundle tests
+        run: uv run --no-project scripts/test_package.py
+      - name: Build Unix bundle
+        if: runner.os != 'Windows'
+        run: bash scripts/build-bundle.sh '${{ matrix.target }}' '${{ matrix.backend }}'
+      - name: Build Windows bundle
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: scripts\build-bundle.cmd
+      - name: Integrity and keyless startup
+        shell: bash
+        run: |
+          uv run --no-project python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          for manifest in Path('dist/release').glob('*/manifest.json'):
+              subprocess.run(['uv','run','--no-project','scripts/package.py','--verify',str(manifest.parent)],check=True)
+              binary=manifest.parent/'bin'/('spqx.exe' if '${{ runner.os }}'=='Windows' else 'spqx')
+              subprocess.run([str(binary.resolve()),'--version'],check=True)
+          PY
+      - name: Canonical release asset names
+        shell: bash
+        run: |
+          uv run --no-project python - <<'PY'
+          from pathlib import Path
+          import hashlib, shutil
+          root=Path('dist/release'); ext='.zip' if '${{ runner.os }}'=='Windows' else '.tar.gz'
+          source=next(p for p in root.iterdir() if p.name.endswith(ext))
+          dest=root/('spqx-${{ matrix.target }}-${{ matrix.backend }}'+ext)
+          shutil.copy2(source,dest)
+          with dest.open('rb') as f: digest=hashlib.file_digest(f,'sha256').hexdigest()
+          (root/(dest.name+'.sha256')).write_text(digest+'  '+dest.name+'\n')
+          source.unlink(); source.with_name(source.name+'.sha256').unlink()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}-${{ matrix.backend }}
+          path: |
+            dist/release/*.tar.gz
+            dist/release/*.zip
+            dist/release/*.sha256
+          if-no-files-found: error
+  cuda:
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:12.0.1-devel-ubuntu22.04
+    steps:
+      - name: Build dependencies
+        run: apt-get update && apt-get install -y git curl build-essential cmake ninja-build pkg-config libasound2-dev
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v6
+      - name: Build CUDA 12 bundle without a GPU
+        env:
+          SPQX_CUDA_ARCHITECTURES: '89'
+        run: bash scripts/build-bundle.sh x86_64-unknown-linux-gnu cuda
+      - name: Verify and name artifact
+        run: |
+          uv run --no-project python - <<'PY'
+          from pathlib import Path
+          import hashlib,shutil,subprocess
+          root=Path('dist/release'); source=next(root.glob('*.tar.gz'))
+          stage=next(p.parent for p in root.glob('*/manifest.json'))
+          subprocess.run(['uv','run','--no-project','scripts/package.py','--verify',str(stage)],check=True)
+          dest=root/'spqx-x86_64-unknown-linux-gnu-cuda.tar.gz';shutil.copy2(source,dest)
+          with dest.open('rb') as f:digest=hashlib.file_digest(f,'sha256').hexdigest()
+          (root/(dest.name+'.sha256')).write_text(digest+'  '+dest.name+'\n')
+          source.unlink();source.with_name(source.name+'.sha256').unlink()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-cuda12-sm89
+          path: |
+            dist/release/*.tar.gz
+            dist/release/*.sha256
+          if-no-files-found: error
+# Hosted GPU execution is not implied: real model acceptance is opt-in and
+# recorded separately. CUDA artifact currently targets SM89 (tested RTX4090).

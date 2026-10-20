@@ -24,6 +24,12 @@ build-portable:
 runtime backend="cpu" out="target/spqx-runtime":
     bash scripts/build-qwentts-runtime.sh "{{backend}}" "{{out}}"
 
+test-package:
+    uv run --no-project scripts/test_package.py
+
+bundle target backend:
+    bash scripts/build-bundle.sh "{{target}}" "{{backend}}"
+
 fmt:
     cargo fmt -p spqx-core -p spqx-cli
 
