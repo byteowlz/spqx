@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import subprocess
+import struct
 import zipfile
 from pathlib import Path
 import tempfile
@@ -39,6 +40,14 @@ class Integrity(unittest.TestCase):
         self.record['link']={'symlink':str(self.root.parent)};self.save()
         with self.assertRaises(ValueError): package.verify(self.root)
 
+    def test_binary_architecture(self):
+        path=self.root/'binary';data=bytearray(128);data[:6]=b'\x7fELF\x02\x01';struct.pack_into('<H',data,18,62);path.write_bytes(data)
+        package.check_binary(path,'x86_64-unknown-linux-gnu')
+        with self.assertRaises(ValueError): package.check_binary(path,'aarch64-apple-darwin')
+        data=bytearray(128);struct.pack_into('<II',data,0,0xfeedfacf,0x100000c);path.write_bytes(data)
+        package.check_binary(path,'aarch64-apple-darwin')
+        data=bytearray(128);data[:2]=b'MZ';struct.pack_into('<I',data,60,80);data[80:84]=b'PE\0\0';struct.pack_into('<H',data,84,0x8664);path.write_bytes(data)
+        package.check_binary(path,'x86_64-pc-windows-msvc')
     def test_extra_file(self):
         (self.root/'unexpected.dll').write_bytes(b'not recorded')
         with self.assertRaises(ValueError): package.verify(self.root)

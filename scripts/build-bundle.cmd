@@ -25,6 +25,14 @@ if not exist "%SPQX_QWENTTS_SOURCE%\.git" (
 )
 for /f %%i in ('git -C "%SPQX_QWENTTS_SOURCE%" rev-parse HEAD') do if not "%%i"=="5916bf7c79dbb4e66fc059cdc507a79a23a28bb4" exit /b 2
 for /f %%i in ('git -C "%SPQX_QWENTTS_SOURCE%\ggml" rev-parse HEAD') do if not "%%i"=="cc5df49a6b878db2b68b9a7b45976e279594627d" exit /b 2
+git -C "%SPQX_QWENTTS_SOURCE%" diff --quiet
+if errorlevel 1 exit /b 2
+git -C "%SPQX_QWENTTS_SOURCE%" diff --cached --quiet
+if errorlevel 1 exit /b 2
+git -C "%SPQX_QWENTTS_SOURCE%\ggml" diff --quiet
+if errorlevel 1 exit /b 2
+git -C "%SPQX_QWENTTS_SOURCE%\ggml" diff --cached --quiet
+if errorlevel 1 exit /b 2
 if exist target\bundle-runtime-cpu\lib exit /b 2
 cmake -S "%SPQX_QWENTTS_SOURCE%" -B target\bundle-runtime-cpu\build -G Ninja -DQWEN_SHARED=ON -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_METAL=OFF -DGGML_BLAS=OFF -DGGML_OPENMP=OFF -DCMAKE_BUILD_TYPE=Release
 if errorlevel 1 exit /b 1

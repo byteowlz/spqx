@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import sys
 import subprocess
+import struct
 import tarfile
 import zipfile
 
@@ -22,6 +23,19 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def check_binary(path, target):
+    with path.open('rb') as stream: header=stream.read(4096)
+    valid=False
+    if target=='x86_64-unknown-linux-gnu':
+        valid=len(header)>=20 and header[:6]==b'\x7fELF\x02\x01' and struct.unpack_from('<H',header,18)[0]==62
+    elif target=='aarch64-apple-darwin':
+        valid=len(header)>=8 and struct.unpack_from('<II',header)==(0xfeedfacf,0x100000c)
+    elif target=='x86_64-pc-windows-msvc' and len(header)>=64 and header[:2]==b'MZ':
+        offset=struct.unpack_from('<I',header,60)[0]
+        valid=offset+6<=len(header) and header[offset:offset+4]==b'PE\0\0' and struct.unpack_from('<H',header,offset+4)[0]==0x8664
+    if not valid: raise ValueError('binary architecture does not match '+target+': '+str(path))
+
+
 def copy_file(source, destination):
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination, follow_symlinks=True)
@@ -29,6 +43,8 @@ def copy_file(source, destination):
 
 def native_sources(source, destination, prefix):
     """Only tracked public source, never build trees, models or local Git state."""
+    for args in (["diff", "--quiet"], ["diff", "--cached", "--quiet"]):
+        subprocess.run(["git", "-C", str(source), *args], check=True)
     data = subprocess.check_output(["git", "-C", str(source), "archive", "--format=tar.gz", "--prefix=" + prefix + "/", "HEAD"])
     destination.write_bytes(data)
 
@@ -115,6 +131,7 @@ def installers(stage, name, windows):
 def stage_native_runtime(stage, args, windows):
     for binary in ("spqx", "spqx-tts-worker"):
         file = binary + (".exe" if windows else "")
+        check_binary(args.binaries / file, args.target)
         copy_file(args.binaries / file, stage / "bin" / file)
     for source in ([args.runtime] if args.runtime else []):
         for path in source.iterdir():
