@@ -1,0 +1,14 @@
+serve:
+    bun server.ts
+
+test:
+    bun test
+
+check:
+    bun build server.ts --target=bun --outdir /tmp/spqx-voice-lab-check
+
+open:
+    bun scripts/open.ts
+
+browser-check:
+    bun scripts/browser-check.ts

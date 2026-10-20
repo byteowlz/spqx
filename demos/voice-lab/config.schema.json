@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Spqx Voice Lab configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "host": {
+      "type": "string",
+      "description": "Loopback or explicit tailnet IPv4 only; no wildcard bind."
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1024,
+      "maximum": 65535,
+      "default": 8804
+    },
+    "profile": {
+      "type": "string",
+      "description": "Private model-scoped PCA probe directory; no assets committed."
+    },
+    "python": {
+      "type": "string",
+      "description": "Existing SDK environment Python, invoked via uv."
+    },
+    "data": {
+      "type": "string",
+      "description": "Private app state directory."
+    },
+    "preview": {
+      "type": "boolean",
+      "default": false
+    },
+    "max_daily": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50,
+      "default": 12
+    }
+  }
+}

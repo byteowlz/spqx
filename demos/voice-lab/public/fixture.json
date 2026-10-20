@@ -1,0 +1,85 @@
+{
+  "title": "Voice Lab",
+  "space": "5793d288eb60b320cf3eb0ac7fd6274f27c10ba5f4e08d0189f3227f85974a3b",
+  "model": {
+    "id": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+    "revision": "5d83992436eae1d760afd27aff78a71d676296fc"
+  },
+  "text": "Die Spracherkennung l\u00e4uft direkt auf deinem Ger\u00e4t. Wenn du m\u00f6chtest, wechseln wir jetzt die Stimme. Sag einfach Bescheid, sobald du bereit bist.",
+  "seed": 4242,
+  "dimension": 1024,
+  "voices": [
+    {
+      "id": "A",
+      "note": "keep,no accent",
+      "position": [
+        0.46765337255017597,
+        -1.0557621211597716
+      ]
+    },
+    {
+      "id": "C",
+      "note": "keep",
+      "position": [
+        0.6804901310026185,
+        0.9328807613738062
+      ]
+    },
+    {
+      "id": "D",
+      "note": "keep with unlocalized robotic-section caveat",
+      "position": [
+        -1.1481435035527943,
+        0.12288135978596552
+      ]
+    }
+  ],
+  "clips": [
+    {
+      "id": "baseline-icl",
+      "seconds": 7.84
+    },
+    {
+      "id": "baseline-xvector",
+      "seconds": 7.36
+    },
+    {
+      "id": "pc1-minus",
+      "seconds": 8.32
+    },
+    {
+      "id": "pc1-plus",
+      "seconds": 7.28
+    },
+    {
+      "id": "pc2-minus",
+      "seconds": 7.92
+    },
+    {
+      "id": "pc2-plus",
+      "seconds": 8.72
+    },
+    {
+      "id": "roundtrip-direct",
+      "seconds": 7.04
+    },
+    {
+      "id": "roundtrip-reloaded",
+      "seconds": 5.76
+    }
+  ],
+  "capabilities": {
+    "live_preview": false,
+    "registry_promote": false,
+    "pca_calibrated": false
+  },
+  "authorized": false,
+  "drafts": [],
+  "jobs": [],
+  "pairUrls": {
+    "modes": "http://100.64.0.12:8010/media/2026-10-20-125850-voice-pca-modes-217edd91.m4a",
+    "pc1": "http://100.64.0.12:8010/media/2026-10-20-125850-voice-pca-pc1-217edd91.m4a",
+    "pc2": "http://100.64.0.12:8010/media/2026-10-20-125850-voice-pca-pc2-217edd91.m4a",
+    "save": "http://100.64.0.12:8010/media/2026-10-20-125850-voice-pca-save-217edd91.m4a"
+  }
+}
