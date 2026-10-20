@@ -5,7 +5,7 @@ Local speech synthesis from text and a reference voice. Execution engines and vo
 ## Language
 
 **Engine**:
-A complete text-and-reference-to-audio implementation.
+A complete text-and-conditioning-to-audio implementation.
 _Avoid_: Tensor backend when referring to the complete synthesis pipeline.
 
 **Device**:
@@ -17,8 +17,17 @@ Audio and its matching transcript used to condition synthesis.
 _Avoid_: Enrollment, identity proof, or permission to redistribute.
 
 **Prepared synthesis session** (prepared voice session for reference cloning):
-A loaded model and checkpoint-scoped reference or description conditioning retained for repeated synthesis requests. Description reuse samples candidates; it does not establish a persistent speaker identity.
+A loaded model and checkpoint-scoped reference, description or frozen conditioning retained for repeated synthesis requests. Description reuse samples candidates; it does not establish a persistent speaker identity.
 _Avoid_: Conversation session, durable session, cross-engine voice embedding, automatic registry enrollment.
+
+**Frozen conditioning**:
+The complete, selected synthesis conditioning in one specific engine/model/encoder space. It is not a recognition embedding or a cross-model identity.
+
+**Saved audition**:
+A completed performance kept with its matching text, frozen conditioning and provenance. Reopening it must not regenerate or reinterpret the selected take.
+
+**PCA space**:
+Principal directions fitted to independent voice-conditioning samples in one compatible space. Coordinates are measured offsets, not guaranteed semantic traits.
 
 **Synthesis request**:
 One text utterance with generation options and its own output/cancellation identity.

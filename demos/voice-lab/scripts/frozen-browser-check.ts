@@ -1,0 +1,47 @@
+// Actual native proof ONLY against a fresh, isolated loopback service; never defaults to live user state.
+import {chromium,expect} from '@playwright/test';
+import {mkdir,writeFile} from 'node:fs/promises';
+import {join} from 'node:path';
+const origin=process.env.VOICE_LAB_URL;
+if(origin!=='http://127.0.0.1:8805')throw new Error('Use the isolated loopback native fixture on 127.0.0.1:8805; no live-user default.');
+const out=join(import.meta.dir,'../.impeccable/review');await mkdir(out,{recursive:true});
+const browser=await chromium.launch({headless:true,args:['--disable-gpu']});
+const context=await browser.newContext({viewport:{width:1280,height:1000}}),page=await context.newPage();
+const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+try{
+ await page.goto(origin);await expect(page.locator('#save')).toHaveText('Save reusable voice');
+ const initial=await page.evaluate(async()=>await(await fetch('/api/state')).json());
+ if(initial.jobs.length||initial.drafts.length)throw new Error('Isolated fixture must start empty.');
+ expect(initial.provider).toBe('native-spqx');expect(initial.access).toBe('trusted-tailnet');
+ await page.locator('#current-audio').evaluate((audio:HTMLAudioElement)=>audio.load());
+ await page.waitForFunction(()=>{const audio=document.getElementById('current-audio') as HTMLAudioElement;return audio.readyState>=2&&audio.duration>2;});
+ for(let i=0;i<6;i++)await page.locator('#pc1').press('ArrowRight');for(let i=0;i<4;i++)await page.locator('#pc2').press('ArrowLeft');await page.waitForTimeout(200);
+ expect((await page.evaluate(async()=>await(await fetch('/api/state')).json())).jobs).toHaveLength(0);
+ const started=performance.now(),queued=page.waitForResponse(r=>r.url()===origin+'/api/preview'&&r.request().method()==='POST');
+ await page.locator('#preview').click();const queuedJob=await(await queued).json();
+ await page.locator('#pc1').press('ArrowRight');
+ await page.waitForFunction(id=>(document.getElementById('current-audio') as HTMLAudioElement).src.endsWith('/media/job-'+id),queuedJob.id,{timeout:60000});
+ const readyMs=performance.now()-started;
+ await expect(page.locator('#rendered-settings')).toContainText('PC1 +0.30');await expect(page.locator('#dirty')).toHaveText('Changes not previewed');
+ const wave=await page.evaluate(async id=>Array.from(new Uint8Array(await(await fetch('/media/job-'+id)).arrayBuffer())),queuedJob.id);
+ await writeFile(join(out,'native-browser-preview.wav'),Buffer.from(wave));
+ await page.locator('#pin').click();expect(await page.locator('#pinned-audio').getAttribute('src')).toContain(queuedJob.id);
+ await page.locator('#current-audio').evaluate(async(audio:HTMLAudioElement)=>{audio.load();await audio.play();});
+ await page.waitForFunction(()=>(document.getElementById('current-audio') as HTMLAudioElement).currentTime>.2);
+ await page.locator('#current-audio').evaluate((audio:HTMLAudioElement)=>audio.pause());
+ const name='Synthetic frozen browser proof';await page.locator('#draft-name').fill(name);
+ const saving=page.waitForResponse(r=>r.url()===origin+'/api/voices'&&r.request().method()==='POST');await page.locator('#save').click();
+ const response=await saving;expect(response.status()).toBe(201);const saved=await response.json();
+ expect(saved.registry_promoted).toBe(true);expect(saved.canonical_voice_id).toMatch(/^vox-/);
+ await expect(page.locator('#notice')).toContainText('Reusable voice saved as '+saved.canonical_voice_id);
+ const replay=await page.evaluate(async(body)=>{const r=await fetch('/api/voices',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return {status:r.status,data:await r.json()};},{job:queuedJob.id,name});
+ expect(replay.status).toBe(201);expect(replay.data.canonical_voice_id).toBe(saved.canonical_voice_id);
+ const state=await page.evaluate(async()=>await(await fetch('/api/state')).json());expect(state.jobs).toHaveLength(1);expect(state.drafts).toHaveLength(1);
+ const range=await context.request.get(origin+'/media/draft-'+saved.id,{headers:{Range:'bytes=0-99'}});expect(range.status()).toBe(206);expect((await range.body()).length).toBe(100);
+ const missingOrigin=await context.request.post(origin+'/api/voices',{data:{job:queuedJob.id,name}});expect(missingOrigin.status()).toBe(403);
+ await page.reload();await page.locator('#draft-list button').click();await expect(page.locator('#pc1')).toHaveValue('0.3');await expect(page.locator('#pc2')).toHaveValue('-0.2');
+ await expect(page.locator('#rendered-settings')).toContainText('saved draft');expect(await page.locator('#current-audio').getAttribute('src')).toContain('/media/draft-'+saved.id);
+ expect(errors).toEqual([]);
+ const report={provider:'native-spqx',new_native_render:true,job:queuedJob.id,draft:saved.id,voice_id:saved.canonical_voice_id,recipe:saved.recipe,ready_ms:readyMs,requested_axes:[.3,-.2],later_unrendered_axis:.35,stale_settings_fenced:true,no_drag_generation:true,one_generated_job:true,canonical_save:true,retry_same_identity:true,range206_100bytes:true,missing_origin_denied:true,fresh_context_no_credentials:true,saved_audio_browser_decode_and_clock:true,physical_phone:false,human_listening_approved:false,global_registry_used:false};
+ await writeFile(join(out,'native-browser-proof.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+}finally{await context.close();await browser.close();}

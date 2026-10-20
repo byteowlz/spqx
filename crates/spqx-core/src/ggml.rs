@@ -1,4 +1,5 @@
 //! Pinned whole-pipeline libqwen binding. No tensor-level bridge or Python runtime.
+use crate::conditioning::{hash_file, ConditioningBackend, ConditioningScope, FrozenConditioning};
 use crate::synthesis::{ggml_device, EngineOptions, Sampling, Stop};
 use anyhow::{bail, Context, Result};
 use libloading::Library;
@@ -185,15 +186,18 @@ pub(crate) struct Session {
     voice: Voice,
     conditioning: Conditioning,
     language: CString,
+    model_path: PathBuf,
+    codec_path: PathBuf,
 }
 enum Conditioning {
     Reference(CString),
+    Frozen { values: Vec<f32>, seed: i64 },
     Description { instruction: CString, seed: i64 },
 }
 impl Conditioning {
     fn expected_model_type(&self) -> &'static str {
         match self {
-            Self::Reference(_) => "base",
+            Self::Reference(_) | Self::Frozen { .. } => "base",
             Self::Description { .. } => "voice_design",
         }
     }
@@ -201,6 +205,7 @@ impl Conditioning {
     fn fields(&self) -> (*const c_char, *const c_char, i64) {
         match self {
             Self::Reference(transcript) => (transcript.as_ptr(), ptr::null(), -1),
+            Self::Frozen { seed, .. } => (ptr::null(), ptr::null(), *seed),
             Self::Description { instruction, seed } => (ptr::null(), instruction.as_ptr(), *seed),
         }
     }
@@ -272,6 +277,48 @@ impl Session {
             },
         )
     }
+    pub(crate) fn load_frozen(
+        model: &Path,
+        frozen: &FrozenConditioning,
+        language: &str,
+        seed: i64,
+        options: &EngineOptions,
+    ) -> Result<Self> {
+        let (talker, codec) = assets(model, options.codec.as_deref())?;
+        let expected = native_scope(&talker, &codec, frozen.values.len())?;
+        frozen.require_scope(&expected)?;
+        Self::initialize(
+            model,
+            language,
+            options,
+            Conditioning::Frozen {
+                values: frozen.values.clone(),
+                seed,
+            },
+        )
+    }
+    /// Copy the exact native speaker vector; does not carry ICL codes or normalize it.
+    pub(crate) fn frozen_conditioning(&self) -> Result<FrozenConditioning> {
+        let values = match &self.conditioning {
+            Conditioning::Frozen {values, ..} => values.clone(),
+            Conditioning::Reference(_) => {
+                if self.voice.embedding.is_null() || !(2..=8192).contains(&self.voice.dim) {
+                    bail!("native speaker encoder returned an invalid vector");
+                }
+                // Pinned ABI owns dim finite-readable values until this session is dropped.
+                unsafe { std::slice::from_raw_parts(self.voice.embedding, self.voice.dim as usize) }.to_vec()
+            },
+            Conditioning::Description { .. } => bail!("VoiceDesign has no directly exportable Base speaker vector; audition then encode with the chosen Base checkpoint"),
+        };
+        let result = FrozenConditioning {
+            version: 1,
+            scope: native_scope(&self.model_path, &self.codec_path, values.len())?,
+            values,
+            recipe: None,
+        };
+        result.validate()?;
+        Ok(result)
+    }
     fn initialize(
         model: &Path,
         language: &str,
@@ -280,8 +327,10 @@ impl Session {
     ) -> Result<Self> {
         let (talker, codec) = assets(model, options.codec.as_deref())?;
         let api = Api::load(&library_path(options.library.as_deref())?)?;
-        let talker = path_text(&talker)?;
-        let codec = path_text(&codec)?;
+        let model_path = talker.canonicalize()?;
+        let codec_path = codec.canonicalize()?;
+        let talker = path_text(&model_path)?;
+        let codec = path_text(&codec_path)?;
         let device = ggml_device(&options.device)?
             .map(|v| ctext(&v))
             .transpose()?;
@@ -307,6 +356,8 @@ impl Session {
             voice: Voice::default(),
             conditioning,
             language,
+            model_path,
+            codec_path,
         };
         let actual = unsafe { (session.api.model_type)(session.context) };
         if actual.is_null() {
@@ -357,7 +408,7 @@ impl Session {
             top_k: i32::try_from(sampling.top_k)?,
             top_p: 1.0,
             penalty: match &self.conditioning {
-                Conditioning::Reference(_) => 1.5,
+                Conditioning::Reference(_) | Conditioning::Frozen { .. } => 1.5,
                 Conditioning::Description { .. } => 1.05,
             },
             sub_temperature: sampling.temperature as f32,
@@ -368,8 +419,14 @@ impl Session {
             cancel_user: ptr::null_mut(),
             chunk: None,
             chunk_user: ptr::null_mut(),
-            embedding: self.voice.embedding,
-            embedding_dim: self.voice.dim,
+            embedding: match &self.conditioning {
+                Conditioning::Frozen { values, .. } => values.as_ptr(),
+                _ => self.voice.embedding,
+            },
+            embedding_dim: match &self.conditioning {
+                Conditioning::Frozen { values, .. } => i32::try_from(values.len())?,
+                _ => self.voice.dim,
+            },
             codes: self.voice.codes,
             reference_frames: self.voice.frames,
         })
@@ -432,6 +489,16 @@ impl Session {
             Ok(Stop::Eos)
         }
     }
+}
+fn native_scope(model: &Path, codec: &Path, dimension: usize) -> Result<ConditioningScope> {
+    Ok(ConditioningScope {
+        backend: ConditioningBackend::Ggml,
+        model_sha256: hash_file(model)?,
+        codec_sha256: hash_file(codec)?,
+        encoder: format!("qwentts.cpp/{REVISION}/raw-speaker-f32"),
+        dimension,
+        representation: "raw-f32".into(),
+    })
 }
 struct Callback<F, C> {
     audio: F,

@@ -30,7 +30,7 @@ The loaded checkpoint's `qt_model_type` must be exactly `voice_design`. Base and
 
 Descriptions must be nonblank, NUL-free and at most 4096 UTF-8 bytes. Seeds must fit nonnegative `i64`; omission selects the native random-seed behavior. Reused descriptions sample candidates, not an automatically persistent speaker identity. For later cloning, explicitly select and preserve an audition's raw audio, matching text and provenance.
 
-MLX and legacy tensor-level VoiceDesign are **not implemented**. They fail explicitly; the old `Qwen3TTSModel::generate_voice_design` no longer reports success with a two-second zero waveform. CustomVoice/preset support and PCA-conditioned synthesis are separate capabilities. No worker opcode was added: description-mode framed-worker startup and Voice Lab integration remain separate work.
+MLX and legacy tensor-level VoiceDesign are **not implemented**. They fail explicitly; the old `Qwen3TTSModel::generate_voice_design` no longer reports success with a two-second zero waveform. CustomVoice/preset support and PCA-conditioned synthesis are separate capabilities. No worker opcode was added: description-mode framed-worker startup remains separate work. Frozen Base-model PCA and canonical-save integration are described in [frozen voices](frozen-voices.md), not capabilities of the description constructor itself.
 
 ## Verification scope
 
@@ -47,7 +47,7 @@ In the final single run, prepared-session first decoded PCM arrived at 128 ms fo
 
 Fresh non-evicting 5 GiB leases were released after each run. The final guard sampled at most 3,826 MiB owned GPU memory (not a continuous peak), with two CPU cores and a 180-second deadline. No shared workload or service was changed. ASR matched the first passage; on the second Whisper reported one extra `Haha` (1 insertion/11 target words). ASR is a proxy, not listening approval of accent, naturalness or character.
 
-CUDA VoiceDesign is the verified target. CPU, Windows, Vulkan, GGML Metal and MLX VoiceDesign are not qualified by these results. The experimental Voice Lab remains on its SDK renderer; canonical promotion and native PCA integration are not delivered by this CLI/API feature.
+CUDA VoiceDesign is the verified target. CPU, Windows, Vulkan, GGML Metal and MLX VoiceDesign are not qualified by these results. This VoiceDesign proof does not qualify PCA or canonical saving. The subsequent [frozen-voice feature](frozen-voices.md) adds a separately qualified native GGML Base/PCA provider and explicit canonical saving to the experimental Lab; SDK and native banks are not interchangeable.
 
 ## Reproduce
 

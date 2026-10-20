@@ -146,6 +146,10 @@ cargo test --release --no-default-features --features mlx \
   --lib qmm_full_batch_matches_chunked_reference -- --nocapture
 ```
 
+## Frozen voices and PCA
+
+`spqx lab` extracts model-scoped vectors, fits genuine PCA, explicitly previews edits and saves the exact vector plus audition WAV/text. Explicit canonical saving uses voqx; `say --voice-id` reuses frozen conditioning without re-encoding the WAV. Native GGML/CUDA is qualified; MLX frozen-input/VoiceDesign inference remains separate work. See [workflow and compatibility](docs/frozen-voices.md) and the [experimental slider/A-B Lab](demos/voice-lab/README.md).
+
 ## Voice references
 
 Cloning quality is bounded by the reference recording. Hard-won guidelines:

@@ -190,15 +190,69 @@ impl Session {
         options: &EngineOptions,
     ) -> Result<Self> {
         let seed = validate_design(description, language, seed)?;
+        Self::load_conditioned(
+            model,
+            language,
+            options,
+            PreparedInput::Description { description, seed },
+        )
+    }
+    /// Load an exact saved raw speaker vector, without reference encoding or ICL substitution.
+    /// The consuming backend/artifacts must match; native validates model width before generation.
+    pub fn load_frozen(
+        model: &Path,
+        frozen: &crate::conditioning::FrozenConditioning,
+        language: &str,
+        seed: Option<u64>,
+        options: &EngineOptions,
+    ) -> Result<Self> {
+        frozen.validate()?;
+        let seed = checked_seed(seed)?;
+        Self::load_conditioned(
+            model,
+            language,
+            options,
+            PreparedInput::Frozen { frozen, seed },
+        )
+    }
+    fn load_conditioned(
+        model: &Path,
+        language: &str,
+        options: &EngineOptions,
+        input: PreparedInput<'_>,
+    ) -> Result<Self> {
         let kind = select_backend(model, options.backend)?;
         let inner = match kind {
             #[cfg(feature = "qwentts")]
-            Backend::Ggml => Inner::Ggml(crate::ggml::Session::load_voice_design(
-                model, description, language, seed, options,
-            )?),
-            _ => bail!("VoiceDesign is not implemented for {kind:?}; use a VoiceDesign GGUF checkpoint with the pinned GGML runtime (no fallback)"),
+            Backend::Ggml => Inner::Ggml(match input {
+                PreparedInput::Description { description, seed } => {
+                    crate::ggml::Session::load_voice_design(
+                        model,
+                        description,
+                        language,
+                        seed,
+                        options,
+                    )?
+                }
+                PreparedInput::Frozen { frozen, seed } => {
+                    crate::ggml::Session::load_frozen(model, frozen, language, seed, options)?
+                }
+            }),
+            _ => bail!(
+                "{} is not implemented for {kind:?}; no fallback",
+                "requested non-reference conditioning"
+            ),
         };
         Ok(Self { kind, inner })
+    }
+    /// Export the raw speaker vector from native reference preparation, without recognition enrollment.
+    pub fn frozen_conditioning(&self) -> Result<crate::conditioning::FrozenConditioning> {
+        match &self.inner {
+            #[cfg(feature = "qwentts")]
+            Inner::Ggml(engine) => engine.frozen_conditioning(),
+            #[cfg(any(spqx_mlx, feature = "tch-backend"))]
+            _ => bail!("raw conditioning export is not implemented for this engine; no fallback"),
+        }
     }
     /// Selected engine name (not a claim that an automatic device was observed).
     pub fn backend_name(&self) -> &'static str {
@@ -261,6 +315,16 @@ impl Session {
     }
 }
 
+enum PreparedInput<'a> {
+    Description {
+        description: &'a str,
+        seed: i64,
+    },
+    Frozen {
+        frozen: &'a crate::conditioning::FrozenConditioning,
+        seed: i64,
+    },
+}
 fn validate_design(description: &str, language: &str, seed: Option<u64>) -> Result<i64> {
     if description.trim().is_empty() || description.len() > 4096 || description.contains('\0') {
         bail!("VoiceDesign description must be nonempty UTF-8, at most 4096 bytes, without NUL");
@@ -268,6 +332,9 @@ fn validate_design(description: &str, language: &str, seed: Option<u64>) -> Resu
     if language.trim().is_empty() || language.contains('\0') {
         bail!("VoiceDesign language must be nonempty and without NUL");
     }
+    checked_seed(seed)
+}
+fn checked_seed(seed: Option<u64>) -> Result<i64> {
     Ok(seed
         .map(i64::try_from)
         .transpose()

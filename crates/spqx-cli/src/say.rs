@@ -18,7 +18,23 @@ pub struct SayArgs {
     pub text: Option<String>,
     /// Voice: a registry name (see `spqx voices`) or the config default.
     #[arg(long)]
+    #[arg(conflicts_with = "voice_id")]
     pub voice: Option<String>,
+    /// Canonical voqx voice identity; never joins by display name.
+    #[arg(long, conflicts_with_all = ["voice", "ref_audio", "ref_text", "ref_text_file"])]
+    pub voice_id: Option<String>,
+    /// Explicit performance within the canonical synthesis profile.
+    #[arg(long, requires = "voice_id")]
+    pub reference_id: Option<String>,
+    /// Override the canonical registry root (otherwise XDG voice-registry).
+    #[arg(long, requires = "voice_id")]
+    pub registry: Option<PathBuf>,
+    /// Explicit synthesis language (separate from the archived reference language).
+    #[arg(long)]
+    pub language: Option<String>,
+    /// Override a saved frozen voice's sampler seed.
+    #[arg(long, requires = "voice_id")]
+    pub seed: Option<u64>,
     /// Reference WAV for ad-hoc voice cloning (bypasses the registry).
     #[arg(long, value_name = "WAV")]
     pub ref_audio: Option<PathBuf>,
@@ -36,8 +52,34 @@ pub struct SayArgs {
     pub no_play: bool,
 }
 
+impl SayArgs {
+    fn effective_config(&self, common: &CommonOpts) -> Result<Config> {
+        let mut config = common.load_config()?;
+        if let Some(language) = &self.language {
+            config.voice.language = language.clone();
+        }
+        Ok(config)
+    }
+    fn reference(&self, config: &Config) -> Result<Reference> {
+        let mut reference = if let Some(id) = &self.voice_id {
+            crate::bundles::resolve(id, self.reference_id.as_deref(), self.registry.as_deref())?
+        } else {
+            engine::resolve_reference(
+                config,
+                self.voice.as_deref(),
+                self.ref_audio.as_deref(),
+                self.ref_text.as_deref(),
+                self.ref_text_file.as_deref(),
+            )?
+        };
+        if self.seed.is_some() {
+            reference.seed = self.seed;
+        }
+        Ok(reference)
+    }
+}
 pub fn run(args: SayArgs, common: &CommonOpts) -> Result<()> {
-    let config = common.load_config()?;
+    let config = args.effective_config(common)?;
 
     let text = match args.text.as_deref() {
         Some("-") | None => read_stdin()?,
@@ -47,13 +89,7 @@ pub fn run(args: SayArgs, common: &CommonOpts) -> Result<()> {
         bail!("no text to speak (pass TEXT or pipe it on stdin)");
     }
 
-    let reference = engine::resolve_reference(
-        &config,
-        args.voice.as_deref(),
-        args.ref_audio.as_deref(),
-        args.ref_text.as_deref(),
-        args.ref_text_file.as_deref(),
-    )?;
+    let reference = args.reference(&config)?;
 
     let play = config.audio.play && !args.no_play;
     let want_wav = args.out.is_some();

@@ -418,11 +418,23 @@ pub fn write_wav_file(path: &str, samples: &[f32], sample_rate: u32) -> Result<(
 
 /// Write audio to WAV bytes (16-bit signed integer, matching `write_wav_file`).
 pub fn write_wav_bytes(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
+    wav_bytes(samples, sample_rate, false)
+}
+
+/// Preserve native f32 audition samples without integer quantization or DSP.
+pub fn write_wav_float_bytes(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
+    wav_bytes(samples, sample_rate, true)
+}
+fn wav_bytes(samples: &[f32], sample_rate: u32, float: bool) -> Result<Vec<u8>> {
     let spec = WavSpec {
         channels: 1,
         sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
+        bits_per_sample: if float { 32 } else { 16 },
+        sample_format: if float {
+            hound::SampleFormat::Float
+        } else {
+            hound::SampleFormat::Int
+        },
     };
 
     let mut buffer = Cursor::new(Vec::new());
@@ -431,11 +443,12 @@ pub fn write_wav_bytes(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
             .map_err(|e| Qwen3TTSError::Audio(format!("Failed to create WAV writer: {}", e)))?;
 
         for &sample in samples {
-            let clamped = sample.clamp(-1.0, 1.0);
-            let scaled = (clamped * 32767.0) as i16;
-            writer
-                .write_sample(scaled)
-                .map_err(|e| Qwen3TTSError::Audio(format!("Failed to write sample: {}", e)))?;
+            let result = if float {
+                writer.write_sample(sample)
+            } else {
+                writer.write_sample((sample.clamp(-1.0, 1.0) * 32767.0) as i16)
+            };
+            result.map_err(|e| Qwen3TTSError::Audio(format!("Failed to write sample: {}", e)))?;
         }
 
         writer

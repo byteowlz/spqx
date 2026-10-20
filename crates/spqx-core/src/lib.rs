@@ -39,6 +39,7 @@ compile_error!("Enable qwentts, tch-backend, or MLX on Apple Silicon");
 pub mod audio;
 #[cfg(spqx_mlx)]
 pub mod backend;
+pub mod conditioning;
 pub mod config;
 pub mod error;
 #[cfg(feature = "qwentts")]

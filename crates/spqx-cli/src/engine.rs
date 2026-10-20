@@ -15,6 +15,8 @@ pub struct Reference {
     pub wav: PathBuf,
     pub text: String,
     pub label: String,
+    pub frozen: Option<spqx_core::conditioning::FrozenConditioning>,
+    pub seed: Option<u64>,
 }
 
 /// Resolve the local model directory: explicit `model.path`, else the newest
@@ -59,6 +61,8 @@ pub fn resolve_reference(
             wav: wav.to_path_buf(),
             text,
             label: wav.display().to_string(),
+            frozen: None,
+            seed: None,
         });
     }
 
@@ -82,6 +86,8 @@ pub fn resolve_reference(
         wav,
         text,
         label: name.to_string(),
+        frozen: None,
+        seed: None,
     })
 }
 
@@ -118,15 +124,26 @@ pub fn synthesize_streaming(
     let _stdout_guard = spqx_core::stdio::StdoutGuard::new()?;
 
     let model_dir = resolve_model_dir(config)?;
-    let session = Session::load(
-        &model_dir,
-        &reference.wav,
-        &reference.text,
-        &spqx_core::worker::normalize_language(&config.voice.language),
-        &config.engine,
-    )?;
+    let language = spqx_core::worker::normalize_language(&config.voice.language);
+    let session = if let Some(frozen) = &reference.frozen {
+        Session::load_frozen(
+            &model_dir,
+            frozen,
+            &language,
+            reference.seed,
+            &config.engine,
+        )?
+    } else {
+        Session::load(
+            &model_dir,
+            &reference.wav,
+            &reference.text,
+            &language,
+            &config.engine,
+        )?
+    };
 
-    stream_session(config, &session, text, true, on_chunk)
+    stream_session(config, &session, text, reference.frozen.is_none(), on_chunk)
 }
 
 /// Native description-only generation; never resolves or substitutes a registry reference.

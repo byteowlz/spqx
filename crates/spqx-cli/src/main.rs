@@ -5,6 +5,7 @@
 //! low-latency runtimes like foxline; this CLI is the interface for
 //! everything else.
 
+mod bundles;
 mod config;
 mod design;
 mod engine;
@@ -13,6 +14,7 @@ mod playback;
 mod say;
 mod serve;
 mod voices;
+mod workbench;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -100,6 +102,8 @@ enum Command {
     Say(say::SayArgs),
     /// Generate a new described voice candidate using a native VoiceDesign checkpoint
     Design(design::DesignArgs),
+    /// Fit/edit real PCA conditioning, preview exact frozen drafts and explicitly save voices
+    Lab(workbench::LabArgs),
     /// Manage the named voice registry
     Voices(voices::VoicesArgs),
     /// Run the binary-framed worker protocol on stdin/stdout
@@ -137,6 +141,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Say(args) => say::run(args, &cli.common),
         Command::Design(args) => design::run(args, &cli.common),
+        Command::Lab(args) => workbench::run(args, &cli.common),
         Command::Voices(args) => voices::run(args, &cli.common),
         Command::Serve(args) => serve::run(args, &cli.common),
         Command::Config { command } => run_config(command, &cli.common),
