@@ -36,7 +36,15 @@ else
     if [[ $backend == cuda ]]; then
         cuda=${CUDA_HOME:-/usr/local/cuda}
         for lib in libcudart.so.12 libcublas.so.12 libcublasLt.so.12; do args+=(--extra-library "$cuda/targets/x86_64-linux/lib/$lib"); done
-        args+=(--extra-license "$cuda/EULA.txt" --requirement 'NVIDIA CUDA 12-compatible system driver; no driver files bundled')
+        if [[ -f "$cuda/EULA.txt" ]]; then eula="$cuda/EULA.txt";
+        elif [[ -f "$cuda/doc/EULA.txt" ]]; then eula="$cuda/doc/EULA.txt";
+        else
+            # Minimal NVIDIA development images omit documentation packages.
+            # Never omit terms or silently substitute another toolkit version.
+            eula=target/CUDA-EULA.txt
+            uv run --no-project scripts/vendor_notices.py --cuda "${SPQX_CUDA_EULA_VERSION:?set the exact CUDA EULA documentation version}" "$eula"
+        fi
+        args+=(--extra-license "$eula" --requirement 'NVIDIA CUDA 12-compatible system driver; no driver files bundled')
     fi
 fi
 uv run --no-project scripts/package.py "${args[@]}"
