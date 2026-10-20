@@ -33,6 +33,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: astral-sh/setup-uv@v6
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Native checkouts/shared libraries also live under target/. Restoring
+          # them as Rust cache can strip Git metadata or mix old build products.
+          # Cache registries only; each bundle gets fresh native inputs/outputs.
+          cache-targets: false
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
         with:

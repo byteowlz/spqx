@@ -3,6 +3,9 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+concurrency:
+  group: portable-contract-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 jobs:
   model-free:
     strategy:
