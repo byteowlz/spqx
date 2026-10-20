@@ -83,6 +83,7 @@ struct Audio {
 struct Api {
     init: unsafe extern "C" fn(*const Init) -> *mut c_void,
     free: unsafe extern "C" fn(*mut c_void),
+    model_type: unsafe extern "C" fn(*const c_void) -> *const c_char,
     extract: unsafe extern "C" fn(*mut c_void, *const f32, i32, *mut Voice) -> i32,
     free_voice: unsafe extern "C" fn(*mut Voice),
     synthesize: unsafe extern "C" fn(*mut c_void, *const Params, *mut Audio) -> i32,
@@ -166,6 +167,7 @@ impl Api {
             Ok(Self {
                 init: symbol(&library, b"qt_init\0")?,
                 free: symbol(&library, b"qt_free\0")?,
+                model_type: symbol(&library, b"qt_model_type\0")?,
                 extract: symbol(&library, b"qt_extract_voice_ref\0")?,
                 free_voice: symbol(&library, b"qt_voice_ref_free\0")?,
                 synthesize: symbol(&library, b"qt_synthesize\0")?,
@@ -181,8 +183,34 @@ pub(crate) struct Session {
     api: Api,
     context: *mut c_void,
     voice: Voice,
-    transcript: CString,
+    conditioning: Conditioning,
     language: CString,
+}
+enum Conditioning {
+    Reference(CString),
+    Description { instruction: CString, seed: i64 },
+}
+impl Conditioning {
+    fn expected_model_type(&self) -> &'static str {
+        match self {
+            Self::Reference(_) => "base",
+            Self::Description { .. } => "voice_design",
+        }
+    }
+    // Unused fields MUST be null: even an empty nonnull reference string is invalid for VoiceDesign.
+    fn fields(&self) -> (*const c_char, *const c_char, i64) {
+        match self {
+            Self::Reference(transcript) => (transcript.as_ptr(), ptr::null(), -1),
+            Self::Description { instruction, seed } => (ptr::null(), instruction.as_ptr(), *seed),
+        }
+    }
+    fn check_model_type(&self, actual: &str) -> Result<()> {
+        let expected = self.expected_model_type();
+        if actual != expected {
+            bail!("operation requires {expected} checkpoint, loaded {actual}; no preset/reference substitution");
+        }
+        Ok(())
+    }
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -218,6 +246,38 @@ impl Session {
         language: &str,
         options: &EngineOptions,
     ) -> Result<Self> {
+        let mut session = Self::initialize(
+            model,
+            language,
+            options,
+            Conditioning::Reference(ctext(transcript)?),
+        )?;
+        session.prepare_reference(reference)?;
+        Ok(session)
+    }
+    pub(crate) fn load_voice_design(
+        model: &Path,
+        description: &str,
+        language: &str,
+        seed: i64,
+        options: &EngineOptions,
+    ) -> Result<Self> {
+        Self::initialize(
+            model,
+            language,
+            options,
+            Conditioning::Description {
+                instruction: ctext(description)?,
+                seed,
+            },
+        )
+    }
+    fn initialize(
+        model: &Path,
+        language: &str,
+        options: &EngineOptions,
+        conditioning: Conditioning,
+    ) -> Result<Self> {
         let (talker, codec) = assets(model, options.codec.as_deref())?;
         let api = Api::load(&library_path(options.library.as_deref())?)?;
         let talker = path_text(&talker)?;
@@ -235,21 +295,27 @@ impl Session {
             codec_chunk: 24.0,
             device: device.as_ref().map_or(ptr::null(), |v| v.as_ptr()),
         };
-        let transcript = ctext(transcript)?;
         let language = ctext(language)?;
         let context = unsafe { (api.init)(&init) };
         if context.is_null() {
             bail!("libqwen initialization: {}", error_text(&api));
         }
-        // Construct the owner before any fallible reference preparation so failure releases the model.
-        let mut session = Self {
+        // Own the context before validation/preparation: all failures release the model.
+        let session = Self {
             api,
             context,
             voice: Voice::default(),
-            transcript,
+            conditioning,
             language,
         };
-        session.prepare_reference(reference)?;
+        let actual = unsafe { (session.api.model_type)(session.context) };
+        if actual.is_null() {
+            bail!("libqwen returned no checkpoint type");
+        }
+        let actual = unsafe { CStr::from_ptr(actual) }
+            .to_str()
+            .context("invalid native model type")?;
+        session.conditioning.check_model_type(actual)?;
         Ok(session)
     }
     fn prepare_reference(&mut self, reference: &Path) -> Result<()> {
@@ -275,21 +341,25 @@ impl Session {
     fn params(&self, text: &CString, sampling: &Sampling) -> Result<Params> {
         let max =
             i32::try_from(sampling.max_new_tokens).context("frame cap exceeds native range")?;
+        let (transcript, instruct, seed) = self.conditioning.fields();
         Ok(Params {
             abi: ABI,
             text: text.as_ptr(),
             lang: self.language.as_ptr(),
-            instruct: ptr::null(),
+            instruct,
             speaker: ptr::null(),
             reference: ptr::null(),
             reference_len: 0,
-            transcript: self.transcript.as_ptr(),
-            seed: -1,
+            transcript,
+            seed,
             max_tokens: max,
             temperature: sampling.temperature as f32,
             top_k: i32::try_from(sampling.top_k)?,
             top_p: 1.0,
-            penalty: 1.5,
+            penalty: match &self.conditioning {
+                Conditioning::Reference(_) => 1.5,
+                Conditioning::Description { .. } => 1.05,
+            },
             sub_temperature: sampling.temperature as f32,
             sub_top_k: i32::try_from(sampling.top_k)?,
             sub_top_p: 1.0,
@@ -417,6 +487,36 @@ where
             state.failed = Some("audio callback panicked");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod conditioning_tests {
+    use super::*;
+    #[test]
+    fn design_and_reference_modes_have_disjoint_native_arguments() {
+        let design = Conditioning::Description {
+            instruction: ctext("Fictional adult German voice").unwrap(),
+            seed: 4242,
+        };
+        assert!(design.check_model_type("voice_design").is_ok());
+        for wrong in ["base", "custom_voice", "", "VoiceDesign"] {
+            assert!(design.check_model_type(wrong).is_err());
+        }
+        let (reference, instruction, seed) = design.fields();
+        assert!(reference.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(instruction) }.to_str().unwrap(),
+            "Fictional adult German voice"
+        );
+        assert_eq!(seed, 4242);
+        let cloned = Conditioning::Reference(ctext("Matching transcript").unwrap());
+        assert!(cloned.check_model_type("base").is_ok());
+        assert!(cloned.check_model_type("voice_design").is_err());
+        let (reference, instruction, seed) = cloned.fields();
+        assert!(!reference.is_null());
+        assert!(instruction.is_null());
+        assert_eq!(seed, -1);
     }
 }
 

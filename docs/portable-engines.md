@@ -98,6 +98,8 @@ spqx --backend ggml --device cuda:0 serve \
   --ref-audio reference.wav --ref-text-file reference.txt
 ```
 
+For description-only generation with a separate VoiceDesign checkpoint, see [native VoiceDesign](voice-design.md). This does not add a worker opcode, enable MLX VoiceDesign or change the reference-cloning mode below.
+
 Use a lawful, same-language reference with its matching transcript. Conditioning remains checkpoint-scoped. Registry identity does not make it cross-engine enrollment or give turn/session authority.
 
 Standalone `spqx-tts-worker` accepts `--backend`, `--device`, `--engine-library`, and `--codec`; `--device` is now honored, defaults to `auto`, and is no longer an ignored Python-compatibility flag. MLX accepts auto/Metal; explicit CUDA requests on MLX fail. Other legacy compatibility flags, including `--seed`, retain their previous limitations.

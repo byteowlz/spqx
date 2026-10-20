@@ -16,9 +16,9 @@ _Avoid_: Engine when only the hardware target changes.
 Audio and its matching transcript used to condition synthesis.
 _Avoid_: Enrollment, identity proof, or permission to redistribute.
 
-**Prepared voice session**:
-A loaded model and checkpoint-scoped reference conditioning retained for repeated synthesis requests.
-_Avoid_: Conversation session, durable session, cross-engine voice embedding.
+**Prepared synthesis session** (prepared voice session for reference cloning):
+A loaded model and checkpoint-scoped reference or description conditioning retained for repeated synthesis requests. Description reuse samples candidates; it does not establish a persistent speaker identity.
+_Avoid_: Conversation session, durable session, cross-engine voice embedding, automatic registry enrollment.
 
 **Synthesis request**:
 One text utterance with generation options and its own output/cancellation identity.

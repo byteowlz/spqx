@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add native description-to-new-voice generation through `synthesis::Session::load_voice_design` and `spqx design`, using the existing pinned GGML engine. Validate the loaded VoiceDesign checkpoint, omit all reference/preset conditioning, expose seed/recipe timing metadata and reject incomplete/silent candidates without overwriting saved WAVs. Actual Linux CUDA German synthesis and cancellation/cap/recovery passed; MLX/other-device VoiceDesign, framed-worker startup, Voice Lab integration and registry promotion remain separate. Replace the legacy VoiceDesign zero-PCM placeholder with an explicit unsupported error. See `docs/voice-design.md`.
+
 - Add a shared prepared synthesis session and a pinned GGML/libqwen whole-pipeline engine behind the CLI and existing worker protocol; keep MLX on Apple Silicon.
 - Add explicit engine/device/codec/runtime-library config and flags, fail closed for unavailable requested devices, and cache GGML reference conditioning across requests.
 - Make portable-only builds independent of MLX/libtorch/playback. Restrict effective MLX compilation to Apple Silicon; add cross-platform CRT framing and Windows stdout-handle synchronization.

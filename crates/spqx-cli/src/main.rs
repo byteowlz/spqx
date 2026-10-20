@@ -6,6 +6,7 @@
 //! everything else.
 
 mod config;
+mod design;
 mod engine;
 mod paths;
 mod playback;
@@ -97,6 +98,8 @@ impl CommonOpts {
 enum Command {
     /// Speak text with live playback and/or WAV output
     Say(say::SayArgs),
+    /// Generate a new described voice candidate using a native VoiceDesign checkpoint
+    Design(design::DesignArgs),
     /// Manage the named voice registry
     Voices(voices::VoicesArgs),
     /// Run the binary-framed worker protocol on stdin/stdout
@@ -133,6 +136,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Say(args) => say::run(args, &cli.common),
+        Command::Design(args) => design::run(args, &cli.common),
         Command::Voices(args) => voices::run(args, &cli.common),
         Command::Serve(args) => serve::run(args, &cli.common),
         Command::Config { command } => run_config(command, &cli.common),

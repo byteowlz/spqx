@@ -398,7 +398,9 @@ impl Qwen3TTSModel {
         })
     }
 
-    /// Generate speech using the VoiceDesign model with natural language instructions.
+    /// Legacy model-level VoiceDesign API: explicitly unsupported, never placeholder PCM.
+    /// Use `synthesis::Session::load_voice_design` with a GGUF VoiceDesign checkpoint
+    /// and the pinned GGML runtime for implemented native description generation.
     ///
     /// # Arguments
     ///
@@ -409,7 +411,7 @@ impl Qwen3TTSModel {
     ///
     /// # Returns
     ///
-    /// `GenerationOutput` containing waveforms and sample rate.
+    /// An explicit unsupported error on this legacy API, never placeholder PCM.
     pub fn generate_voice_design<T, I, L>(
         &self,
         text: T,
@@ -430,37 +432,16 @@ impl Qwen3TTSModel {
             )));
         }
 
-        let texts = [text.as_ref().to_string()];
-        let instructs = [instruct.into()];
-        let languages = vec![language.into()];
-
-        self.validate_languages(&languages)?;
-
-        // Merge generation params
-        let _gen_config = params
-            .unwrap_or_default()
-            .merge_with_defaults(&self.generate_defaults);
-
-        // Build input and instruction text
-        let _input_text = self.build_assistant_text(&texts[0]);
-        let _instruct_text = self.build_instruct_text(instructs[0].text());
-
-        // Placeholder: Actual generation would happen here
-        let sample_rate = 24000;
-        let duration_samples = sample_rate * 2;
-        let waveform = vec![0.0f32; duration_samples as usize];
-
-        tracing::info!(
-            "Generated voice design: text='{}', instruct='{}', language='{}'",
-            texts[0],
-            instructs[0].text(),
-            languages[0].as_str()
-        );
-
-        Ok(GenerationOutput {
-            waveforms: vec![waveform],
-            sample_rate,
-        })
+        let instruction = instruct.into();
+        if instruction.text().trim().is_empty() {
+            return Err(Qwen3TTSError::InvalidInput(
+                "VoiceDesign description must not be empty".into(),
+            ));
+        }
+        let _ = (text, language, params);
+        Err(Qwen3TTSError::Unsupported(
+            "Legacy tensor-level VoiceDesign is not implemented; use synthesis::Session::load_voice_design with the pinned GGML runtime. No silent audio or SDK fallback.".into(),
+        ))
     }
 
     /// Create a voice clone prompt from reference audio.

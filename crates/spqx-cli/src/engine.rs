@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use spqx_core::audio::resample;
-use spqx_core::synthesis::{Sampling, Session};
+use spqx_core::synthesis::{Sampling, Session, Stop};
 
 use crate::config::Config;
 use crate::paths;
@@ -94,6 +94,7 @@ pub fn voices_dir(config: &Config) -> Result<PathBuf> {
 
 /// Timing/summary of one synthesis run.
 pub struct SynthStats {
+    pub backend: &'static str,
     pub ttfa_s: f64,
     pub wall_s: f64,
     pub audio_s: f64,
@@ -110,7 +111,7 @@ pub fn synthesize_streaming(
     config: &Config,
     reference: &Reference,
     text: &str,
-    mut on_chunk: impl FnMut(&[f32]) + Send,
+    on_chunk: impl FnMut(&[f32]) + Send,
 ) -> Result<SynthStats> {
     // Keep the engine's println! progress off the CLI's stdout so `--json`
     // and piped output stay clean; it still reaches a human via stderr.
@@ -125,6 +126,42 @@ pub fn synthesize_streaming(
         &config.engine,
     )?;
 
+    stream_session(config, &session, text, true, on_chunk)
+}
+
+/// Native description-only generation; never resolves or substitutes a registry reference.
+/// Returns generation statistics and preparation time separately. No audio postprocessing.
+pub fn design_streaming(
+    config: &Config,
+    description: &str,
+    seed: Option<u64>,
+    text: &str,
+    on_chunk: impl FnMut(&[f32]) + Send,
+) -> Result<(SynthStats, f64)> {
+    let _stdout_guard = spqx_core::stdio::StdoutGuard::new()?;
+    let started = std::time::Instant::now();
+    let model = resolve_model_dir(config)?;
+    let session = Session::load_voice_design(
+        &model,
+        description,
+        &spqx_core::worker::normalize_language(&config.voice.language),
+        seed,
+        &config.engine,
+    )?;
+    let prepare_s = started.elapsed().as_secs_f64();
+    Ok((
+        stream_session(config, &session, text, false, on_chunk)?,
+        prepare_s,
+    ))
+}
+
+fn stream_session(
+    config: &Config,
+    session: &Session,
+    text: &str,
+    gate_leading: bool,
+    mut on_chunk: impl FnMut(&[f32]) + Send,
+) -> Result<SynthStats> {
     let sample_rate = config.audio.sample_rate_hz;
     let started = std::time::Instant::now();
     let mut ttfa_s = 0.0;
@@ -156,7 +193,9 @@ pub fn synthesize_streaming(
             if first {
                 first = false;
                 ttfa_s = started.elapsed().as_secs_f64();
-                spqx_core::postprocess::gate_leading_nonspeech(&mut buffer, sample_rate);
+                if gate_leading {
+                    spqx_core::postprocess::gate_leading_nonspeech(&mut buffer, sample_rate);
+                }
             }
             audio_samples += buffer.len();
             on_chunk(&buffer);
@@ -169,11 +208,12 @@ pub fn synthesize_streaming(
     }
 
     Ok(SynthStats {
+        backend: session.backend_name(),
         ttfa_s,
         wall_s: started.elapsed().as_secs_f64(),
         audio_s: audio_samples as f64 / sample_rate as f64,
         sample_rate,
-        eos_reached: !stop.truncated(),
+        eos_reached: stop == Stop::Eos,
     })
 }
 
