@@ -112,17 +112,7 @@ def installers(stage, name, windows):
         (stage / "install.sh").chmod(0o755)
 
 
-def package(args):
-    if not args.native_source and not args.material:
-        raise ValueError("native corresponding source materials are required")
-    revision = args.source_revision or subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    name = "spqx-" + revision[:12] + "-" + args.target + "-" + args.backend
-    stage = args.output / name
-    if stage.exists():
-        raise ValueError("refusing to mix or overwrite a bundle: " + str(stage))
-    (stage / "bin").mkdir(parents=True)
-    (stage / "sources").mkdir()
-    windows = "windows" in args.target
+def stage_native_runtime(stage, args, windows):
     for binary in ("spqx", "spqx-tts-worker"):
         file = binary + (".exe" if windows else "")
         copy_file(args.binaries / file, stage / "bin" / file)
@@ -154,9 +144,9 @@ def package(args):
     if "linux" in args.target:
         for binary in ("spqx", "spqx-tts-worker"):
             unix_launcher(stage, binary)
-    for file in ("LICENSE", "README.md", "CHANGELOG.md"):
-        copy_file(ROOT / file, stage / file)
-    copy_file(ROOT / "docs/portable-engines.md", stage / "PORTABLE-ENGINES.md")
+
+
+def add_corresponding_sources(stage, args):
     if args.native_source:
         for filename in ("LICENSE", "ACKNOWLEDGMENTS.md"):
             if (args.native_source / filename).is_file():
@@ -179,6 +169,24 @@ def package(args):
     else:
         project = subprocess.check_output(["git", "archive", "--format=tar.gz", "HEAD", "Cargo.toml", "Cargo.lock", "crates", "scripts", "docs", "LICENSE", "README.md", "CHANGELOG.md", "CONTEXT.md", "justfile", "install.sh", "CLAUDE.md"], cwd=ROOT)
         (stage / "sources/spqx.tar.gz").write_bytes(project)
+
+
+def package(args):
+    if not args.native_source and not args.material:
+        raise ValueError("native corresponding source materials are required")
+    revision = args.source_revision or subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    name = "spqx-" + revision[:12] + "-" + args.target + "-" + args.backend
+    stage = args.output / name
+    if stage.exists():
+        raise ValueError("refusing to mix or overwrite a bundle: " + str(stage))
+    (stage / "bin").mkdir(parents=True)
+    (stage / "sources").mkdir()
+    windows = "windows" in args.target
+    stage_native_runtime(stage, args, windows)
+    for file in ("LICENSE", "README.md", "CHANGELOG.md"):
+        copy_file(ROOT / file, stage / file)
+    copy_file(ROOT / "docs/portable-engines.md", stage / "PORTABLE-ENGINES.md")
+    add_corresponding_sources(stage, args)
     records = rust_materials(stage, args.target, args.features)
     (stage / "THIRD-PARTY-NOTICES.md").write_text(
         "# Third-party components\n\nThe application license does not replace component licenses. "
