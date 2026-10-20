@@ -1,4 +1,4 @@
-"""Collect the visible Microsoft redistribution terms, not page metadata."""
+"""Collect complete versioned vendor terms, never page metadata or models."""
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.request import urlopen
@@ -6,6 +6,28 @@ import sys
 import io
 import zipfile
 from xml.etree import ElementTree
+import re
+
+
+def cuda_terms(version, output):
+    if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+        raise ValueError('use an explicit CUDA documentation version')
+    url='https://docs.nvidia.com/cuda/archive/'+version+'/eula/index.html'
+    class Article(HTMLParser):
+        active=False
+        parts=[]
+        def handle_starttag(self, tag, attrs):
+            if tag=='article' and dict(attrs).get('id')=='contents': self.active=True
+        def handle_endtag(self, tag):
+            if tag=='article': self.active=False
+            if self.active and tag in ('p','li','h1','h2','h3','h4','pre'): self.parts.append('\n')
+        def handle_data(self, data):
+            if self.active:self.parts.append(data)
+    with urlopen(url,timeout=30) as response: document=response.read().decode('utf-8')
+    parser=Article();parser.feed(document);body=''.join(parser.parts)
+    if len(body)<20000 or 'libcudart.so' not in body or 'libcublas.so' not in body:
+        raise ValueError('unexpected or incomplete CUDA EULA; manual review required')
+    output.write_text('Source: '+url+'\n\n'+body,encoding='utf-8')
 
 TERMS = 'https://visualstudio.microsoft.com/wp-content/uploads/2021/09/Visual-C-Runtime-2015-2022-License-1.docx'
 
@@ -22,6 +44,8 @@ class Visible(HTMLParser):
         if self.active: self.parts.append(data)
 
 if __name__=='__main__':
+    if len(sys.argv)==4 and sys.argv[1]=='--cuda':
+        cuda_terms(sys.argv[2],Path(sys.argv[3]));raise SystemExit(0)
     with urlopen(URL, timeout=30) as response: data=response.read().decode('utf-8')
     parser=Visible(); parser.feed(data); text=''.join(parser.parts)
     if 'Visual C++ Runtime Redistributable' not in text or 'devdiv.visualstudio.com' in text:
