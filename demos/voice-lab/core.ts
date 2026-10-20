@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, realpath, readdir } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 
@@ -38,11 +38,10 @@ async function atomic(path: string, value: unknown) {
   await rename(temporary, path);
 }
 export function createApp(options: {
-  origin: string; data: string; token: string; info: any; publicDir: string;
+  origin: string; data: string; info: any; publicDir: string;
   media: Map<string,string>; allowedRoots: string[]; maxDaily: number; recipeFiles?: Record<string,string>;
   render: (recipe: Recipe, id: string, admitted: () => Promise<void>) => Promise<Result>;
 }) {
-  const sessions = new Map<string,number>();
   const jobs = new Map<string,Job>();
   let active: string | null = null;
   let saving = false;
@@ -65,15 +64,10 @@ export function createApp(options: {
     'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src 'self' blob: http://100.64.0.12:8010; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
   };
   const json = (data: unknown, status=200, extra={}) => Response.json(data,{status,headers:{...headers,...extra}});
-  function authorized(req: Request) {
-    const bearer = req.headers.get('authorization')?.replace(/^Bearer /,'');
-    if (bearer && timingSafeEqual(Buffer.from(digest(bearer)),Buffer.from(digest(options.token)))) return true;
-    return !!bearer && (sessions.get(bearer) || 0) > Date.now();
-  }
+  // Explicit single-user trusted-tailnet mode. Reachability is the access boundary;
+  // browser writes still require the exact app Origin. CLI clients send it too.
   function writeGuard(req: Request) {
-    if (!authorized(req)) throw new LabError('locked','Unlock the operator controls first.',401);
-    const origin = req.headers.get('origin');
-    if (origin !== options.origin && !(origin === null && req.headers.get('authorization')?.startsWith('Bearer '))) throw new LabError('origin_denied','This request did not come from Voice Lab.',403);
+    if (req.headers.get('origin') !== options.origin) throw new LabError('origin_denied','This request did not come from Voice Lab.',403);
   }
   async function body(req: Request) {
     const text = await req.text();
@@ -132,10 +126,10 @@ export function createApp(options: {
   }
   async function media(req:Request,id:string) {
     let path=options.media.get(id);
-    if(!path && id.startsWith('job-') && authorized(req)) {
+    if(!path && id.startsWith('job-')) {
       const job=jobs.get(id.slice(4));if(job?.status==='ready')path=join(options.data,'jobs',job.id+'.wav');
     }
-    if(!path && id.startsWith('draft-') && authorized(req) && /^[a-f0-9-]{36}$/.test(id.slice(6))) {
+    if(!path && id.startsWith('draft-') && /^[a-f0-9-]{36}$/.test(id.slice(6))) {
       try{path=await realpath(join(options.data,'drafts',id.slice(6),'reference.wav'));}catch(error:any){if(error.code!=='ENOENT')throw error;}
     }
     if(!path) return json({error:'not_found'},404);
@@ -155,16 +149,7 @@ export function createApp(options: {
       if(req.headers.get('host')!==new URL(options.origin).host) return json({error:'host_denied'},421);
       const url=new URL(req.url),path=url.pathname;
       if(req.method==='GET' && path==='/health')return json({app:'spqx-voice-lab',status:'up',experimental:true});
-      if(req.method==='POST' && path==='/api/unlock') {
-        if(req.headers.get('origin')!==options.origin)throw new LabError('origin_denied','Open Voice Lab directly.',403);
-        const value=await body(req);
-        if(typeof value.token!=='string' || !timingSafeEqual(Buffer.from(digest(value.token)),Buffer.from(digest(options.token))))throw new LabError('invalid_token','The operator key is not valid.',401);
-        for(const [key,expires] of sessions)if(expires<Date.now())sessions.delete(key);
-        if(sessions.size>=16)throw new LabError('session_limit','Too many active sessions.',429);
-        const sid=randomBytes(32).toString('hex');sessions.set(sid,Date.now()+86400000);
-        return json({unlocked:true,session:sid});
-      }
-      if(req.method==='GET' && path==='/api/state')return json({...options.info,authorized:authorized(req),jobs:authorized(req)?[...jobs.values()].sort((a,b)=>b.created.localeCompare(a.created)).slice(0,20):[],drafts:authorized(req)?await draftList():[]});
+      if(req.method==='GET' && path==='/api/state')return json({...options.info,access:'trusted-tailnet',jobs:[...jobs.values()].sort((a,b)=>b.created.localeCompare(a.created)).slice(0,20),drafts:await draftList()});
       if(req.method==='POST' && path==='/api/preview') {
         writeGuard(req);const recipe=validateRecipe(await body(req),options.info.space);
         if(active)throw new LabError('preview_busy','One preview is already running. It will keep its original settings.',409);
@@ -173,7 +158,6 @@ export function createApp(options: {
         void perform(job);return json(job,202);
       }
       if(req.method==='GET' && /^\/api\/jobs\/[a-f0-9-]{36}$/.test(path)) {
-        if(!authorized(req))throw new LabError('locked','Unlock the operator controls first.',401);
         const job=jobs.get(path.split('/').pop()!);return job?json(job):json({error:'not_found'},404);
       }
       if(req.method==='POST' && path==='/api/drafts') {

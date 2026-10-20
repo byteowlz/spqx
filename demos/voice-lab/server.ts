@@ -1,8 +1,7 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, writeFile, open, lstat, unlink } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, open, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { randomBytes } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { isIP } from 'node:net';
 import { createApp, LabError, type Recipe } from './core';
@@ -27,10 +26,6 @@ await mkdir(data,{recursive:true,mode:0o700});
 const lockPath=join(data,'service.lock');
 try {const lock=await open(lockPath,'wx',0o600);await lock.writeFile(String(process.pid));await lock.close();}
 catch(error:any){if(error.code!=='EEXIST')throw error;const pid=Number(await readFile(lockPath,'utf8'));let alive=true;try{process.kill(pid,0);}catch{alive=false;}if(alive)throw new Error('Another Voice Lab instance may own this data directory.');await unlink(lockPath);const lock=await open(lockPath,'wx',0o600);await lock.writeFile(String(process.pid));await lock.close();}
-const tokenFile=join(data,'operator-token');
-try{await writeFile(tokenFile,randomBytes(32).toString('hex'),{flag:'wx',mode:0o600});}catch(e:any){if(e.code!=='EEXIST')throw e;}
-if((await lstat(tokenFile)).isSymbolicLink())throw new Error('Token file must not be a symlink.');
-const token=(await readFile(tokenFile,'utf8')).trim();
 async function command(argv:string[],timeout=15000){
  const p=Bun.spawn(argv,{stdout:'pipe',stderr:'pipe'});const timer=setTimeout(()=>p.kill(),timeout);
  try{const [stdout,stderr,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);if(code!==0)throw new Error('Subprocess failed');return stdout;}finally{clearTimeout(timer);}
@@ -71,7 +66,7 @@ async function render(recipe:Recipe,id:string,admitted:()=>Promise<void>){
  }finally{const receipt=await command([dpty,'loadout','release',lease]);await writeFile(join(data,'jobs',id+'-release.txt'),receipt,{mode:0o600});if(!/released 1 reservation/.test(receipt))throw new LabError('lease_cleanup_unconfirmed','Preview ended but resource cleanup needs operator inspection.',503);}
 }
 const origin=`http://${host}:${port}`;
-const handler=createApp({origin,data,token,info,publicDir:join(here,'public'),media,allowedRoots:[profile,sourceRoot,data],maxDaily:Number(cfg.max_daily),render,recipeFiles:{'basis.npz':join(profile,'basis.npz'),'conditioning.safetensors':join(profile,'conditioning.safetensors')}});
+const handler=createApp({origin,data,info,publicDir:join(here,'public'),media,allowedRoots:[profile,sourceRoot,data],maxDaily:Number(cfg.max_daily),render,recipeFiles:{'basis.npz':join(profile,'basis.npz'),'conditioning.safetensors':join(profile,'conditioning.safetensors')}});
 const server=Bun.serve({hostname:host,port,maxRequestBodySize:4096,fetch:handler});
-console.log(`Voice Lab: ${origin} (experimental; operator key stays in the private data directory)`);
+console.log(`Voice Lab: ${origin} (experimental; trusted-tailnet access, no key)`);
 for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,async()=>{server.stop();if(activeChild?.pid){try{process.kill(-activeChild.pid,'SIGTERM');}catch{}}await unlink(lockPath).catch(()=>{});setTimeout(()=>process.exit(0),12000);});

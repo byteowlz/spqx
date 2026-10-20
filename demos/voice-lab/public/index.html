@@ -2,10 +2,9 @@
 <html lang="en" data-scheme="oqto-light">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Voice Lab</title><link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="styles.css"><script src="app.js" defer></script></head>
 <body>
-<header class="top"><a class="wordmark" href="./">Voice Lab<span class="mark" aria-hidden="true"></span></a><span id="mode" class="muted">Experimental PCA space</span><button id="unlock-link" class="quiet">Unlock controls</button></header>
+<header class="top"><a class="wordmark" href="./">Voice Lab<span class="mark" aria-hidden="true"></span></a><span id="mode" class="muted">Experimental PCA space</span></header>
 <main>
 <div class="intro"><div><h1>Dial in a voice.</h1><p>Make a change. Hear it. Keep what you like.</p></div><div class="space-meta"><strong>Two real PCA axes</strong><span>Three source voices · German · 0.6B Base</span></div></div>
-<section id="auth" class="auth" hidden aria-labelledby="auth-title"><h2 id="auth-title">Operator controls</h2><p>Listening is open. Live previews and saving need the operator key from the service’s private data directory.</p><form id="unlock-form"><label for="key">Operator key</label><div class="inline"><input id="key" type="password" autocomplete="off"><button type="submit">Unlock</button></div></form></section>
 <p id="notice" role="status" aria-live="polite" hidden></p>
 <div class="workbench">
 <section class="controls" aria-labelledby="shape-title">
@@ -26,7 +25,7 @@
 <form id="save-form" class="save"><label for="draft-name">Keep this preview</label><div class="inline"><input id="draft-name" maxlength="60" placeholder="Give this voice a name" required><button id="save" type="submit" disabled>Save draft</button></div><p class="small muted">Saves the actual audio, matching text and PCA recipe. Canonical voice registration is a separate step, not wired up here yet.</p></form>
 </section>
 </div>
-<section class="library" aria-labelledby="draft-title"><div class="section-heading"><h2 id="draft-title">Your drafts</h2><span class="small muted">No automatic enrollment or training</span></div><div id="draft-list"><p class="muted">Unlock to see saved drafts. You can listen and explore the space without changing anything.</p></div></section>
+<section class="library" aria-labelledby="draft-title"><div class="section-heading"><h2 id="draft-title">Your drafts</h2><span class="small muted">No automatic enrollment or training</span></div><div id="draft-list"><p class="muted">Saved voice drafts and their recipes will appear here.</p></div></section>
 <details class="probes"><summary>Listen to the earlier checks</summary><p class="small muted">Explicit pre-rendered comparisons, not substitutes for the current slider settings.</p><div id="probe-list"></div></details>
 <footer>Working prototype · real model-scoped PCA · visual proposal not yet selected</footer>
 </main></body></html>
