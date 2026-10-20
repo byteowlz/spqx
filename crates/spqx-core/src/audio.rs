@@ -208,19 +208,11 @@ fn decode_with_symphonia(path: &str) -> Result<(Vec<f32>, u32)> {
     let sample_rate = track.codec_params.sample_rate.ok_or_else(|| {
         Qwen3TTSError::Audio(format!("Audio track in '{path}' has no sample rate"))
     })?;
-    let channels = track
-        .codec_params
-        .channels
-        .map(|c| c.count())
-        .unwrap_or(1);
+    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| {
-            Qwen3TTSError::Audio(format!(
-                "Unsupported audio codec in '{path}': {e}"
-            ))
-        })?;
+        .map_err(|e| Qwen3TTSError::Audio(format!("Unsupported audio codec in '{path}': {e}")))?;
 
     let mut interleaved: Vec<f32> = Vec::new();
     while let Ok(packet) = format.next_packet() {
@@ -229,7 +221,9 @@ fn decode_with_symphonia(path: &str) -> Result<(Vec<f32>, u32)> {
             // Skip a single corrupt frame and keep decoding the rest.
             Err(errors::Error::DecodeError(_)) => continue,
             Err(e) => {
-                return Err(Qwen3TTSError::Audio(format!("Decode error in '{path}': {e}")))
+                return Err(Qwen3TTSError::Audio(format!(
+                    "Decode error in '{path}': {e}"
+                )))
             }
         };
         let spec = decoded.spec().clone();

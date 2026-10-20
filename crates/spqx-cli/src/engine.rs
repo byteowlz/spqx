@@ -4,55 +4,11 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use spqx_core::audio::{load_wav_file, resample};
-use spqx_core::audio_encoder::AudioEncoder;
-use spqx_core::inference::TTSInference;
-use spqx_core::speaker_encoder::SpeakerEncoder;
-use spqx_core::tensor::Device;
+use spqx_core::audio::resample;
+use spqx_core::synthesis::{Sampling, Session};
 
 use crate::config::Config;
 use crate::paths;
-
-extern "C" {
-    fn dup(fd: i32) -> i32;
-    fn dup2(oldfd: i32, newfd: i32) -> i32;
-    fn close(fd: i32) -> i32;
-}
-
-/// Redirects the process's stdout (fd 1) to stderr (fd 2) for its lifetime,
-/// restoring it on drop. The engine prints progress with `println!`; this
-/// keeps the CLI's real stdout clean for `--json` while that chatter still
-/// reaches a human on stderr.
-struct StdoutToStderr {
-    saved: i32,
-}
-
-impl StdoutToStderr {
-    fn new() -> Option<Self> {
-        unsafe {
-            let saved = dup(1);
-            if saved < 0 {
-                return None;
-            }
-            if dup2(2, 1) < 0 {
-                close(saved);
-                return None;
-            }
-            Some(Self { saved })
-        }
-    }
-}
-
-impl Drop for StdoutToStderr {
-    fn drop(&mut self) {
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-        unsafe {
-            dup2(self.saved, 1);
-            close(self.saved);
-        }
-    }
-}
 
 /// A resolved reference voice (audio + transcript) for ICL cloning.
 pub struct Reference {
@@ -154,47 +110,19 @@ pub fn synthesize_streaming(
     config: &Config,
     reference: &Reference,
     text: &str,
-    mut on_chunk: impl FnMut(&[f32]),
+    mut on_chunk: impl FnMut(&[f32]) + Send,
 ) -> Result<SynthStats> {
     // Keep the engine's println! progress off the CLI's stdout so `--json`
     // and piped output stay clean; it still reaches a human via stderr.
-    let _stdout_guard = StdoutToStderr::new();
+    let _stdout_guard = spqx_core::stdio::StdoutGuard::new()?;
 
-    #[cfg(feature = "mlx")]
-    spqx_core::backend::mlx::stream::init_mlx(true);
-
-    let device = Device::Cpu;
     let model_dir = resolve_model_dir(config)?;
-    let inference = TTSInference::new(&model_dir, device)?;
-
-    let speaker_encoder = SpeakerEncoder::load(
-        inference.weights(),
-        &inference.config().speaker_encoder_config,
-        device,
-    )?;
-    let tokenizer_path = model_dir.join("speech_tokenizer").join("model.safetensors");
-    let audio_encoder = AudioEncoder::load(&tokenizer_path, device)?;
-
-    let se_sr = inference.config().speaker_encoder_config.sample_rate;
-    let (samples, sr) = load_wav_file(
-        reference
-            .wav
-            .to_str()
-            .context("reference path is not valid UTF-8")?,
-    )?;
-    let samples = if sr == se_sr {
-        samples
-    } else {
-        resample(&samples, sr, se_sr)?
-    };
-    let speaker_embedding = speaker_encoder.extract_embedding(&samples)?;
-    let ref_codes = audio_encoder.encode(&samples)?;
-
-    let session = inference.prepare_icl_session(
+    let session = Session::load(
+        &model_dir,
+        &reference.wav,
         &reference.text,
-        &ref_codes,
-        &speaker_embedding,
-        &config.voice.language,
+        &spqx_core::worker::normalize_language(&config.voice.language),
+        &config.engine,
     )?;
 
     let sample_rate = config.audio.sample_rate_hz;
@@ -203,18 +131,27 @@ pub fn synthesize_streaming(
     let mut first = true;
     let mut audio_samples = 0usize;
 
-    let stop = inference.generate_with_icl_session_streaming(
-        &session,
+    let sampling = Sampling {
+        temperature: config.sampling.temperature,
+        top_k: config.sampling.top_k,
+        max_new_tokens: 1536,
+        chunk_size: 4,
+    };
+    let mut stream_error = None;
+    let stop = session.synthesize(
         text,
-        config.sampling.temperature,
-        config.sampling.top_k,
-        i64::MAX,
-        4,
+        &sampling,
         |chunk, chunk_sr| {
             let mut buffer = if chunk_sr == sample_rate {
                 chunk.to_vec()
             } else {
-                resample(chunk, chunk_sr, sample_rate).unwrap_or_else(|_| chunk.to_vec())
+                match resample(chunk, chunk_sr, sample_rate) {
+                    Ok(samples) => samples,
+                    Err(error) => {
+                        stream_error = Some(error);
+                        return false;
+                    }
+                }
             };
             if first {
                 first = false;
@@ -225,7 +162,11 @@ pub fn synthesize_streaming(
             on_chunk(&buffer);
             true
         },
+        || false,
     )?;
+    if let Some(error) = stream_error {
+        return Err(error.into());
+    }
 
     Ok(SynthStats {
         ttfa_s,
@@ -238,7 +179,7 @@ pub fn synthesize_streaming(
 
 fn expand(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
             return PathBuf::from(home).join(rest);
         }
     }
@@ -247,9 +188,13 @@ fn expand(path: &str) -> PathBuf {
 
 /// Newest snapshot directory for an HF model id in the local cache.
 fn hf_snapshot(model_id: &str) -> Option<PathBuf> {
-    let cache = match std::env::var_os("HF_HOME") {
-        Some(hf) => PathBuf::from(hf).join("hub"),
-        None => PathBuf::from(std::env::var_os("HOME")?).join(".cache/huggingface/hub"),
+    let cache = if let Some(cache) = std::env::var_os("HF_HUB_CACHE") {
+        PathBuf::from(cache)
+    } else if let Some(home) = std::env::var_os("HF_HOME") {
+        PathBuf::from(home).join("hub")
+    } else {
+        PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?)
+            .join(".cache/huggingface/hub")
     };
     let snapshots = cache
         .join(format!("models--{}", model_id.replace('/', "--")))

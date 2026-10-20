@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
     let model_path = Path::new(&args.model_path);
 
     // Initialize MLX backend if feature enabled
-    #[cfg(feature = "mlx")]
+    #[cfg(spqx_mlx)]
     {
         spqx_core::backend::mlx::stream::init_mlx(true);
         tracing::info!("MLX backend initialized (Metal GPU)");

@@ -3,5 +3,5 @@
 
 //! Backend-specific implementations for tensor operations.
 
-#[cfg(feature = "mlx")]
+#[cfg(spqx_mlx)]
 pub mod mlx;

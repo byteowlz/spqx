@@ -1,6 +1,6 @@
 # spqx
 
-Fast Qwen3-TTS inference in Rust with an Apple Silicon MLX backend: streaming,
+Fast Qwen3-TTS inference in Rust with MLX and whole-pipeline GGML engines: streaming,
 in-context voice cloning, quantized models, and a persistent worker protocol
 built for real-time voice runtimes. Built on top of Mario's fork of
 [qwen3_tts_rs](https://github.com/badlogic/qwen3_tts_rs); spqx is the default
@@ -46,6 +46,9 @@ practical.
   [PiBot](https://github.com/badlogic/pibot)/[foxline](https://github.com/byteowlz/foxline)
   Python worker protocol and CLI. `pibot-tts-worker` remains as an
   upstream-name alias.
+- `spqx` — unified `say`, `serve`, voice registry and configuration CLI.
+- The following tensor-level diagnostics require `legacy-tools` plus `mlx` or
+  `tch-backend`; portable users should use `spqx say`/`serve`:
 - `tts` — one-shot text-to-speech with preset voices.
 - `voice_clone` — one-shot voice cloning from reference audio + transcript.
 - `api_server` — OpenAI-compatible HTTP speech API (early; see roadmap).
@@ -53,7 +56,22 @@ practical.
   parity traces against the Python implementation (compare tools in
   `scripts/`).
 
-## Requirements
+## Portable engines
+
+The first GGML integration keeps one CLI/worker contract across desktop targets.
+Linux x86-64 CUDA/CPU integration is tested; Windows runtime bundles and other
+accelerators are not yet qualified. MLX remains the Apple Silicon default.
+See [builds, configuration and evidence](docs/portable-engines.md).
+
+```sh
+just test-portable
+just build-portable
+```
+
+Published release bundles remain macOS-only for now. The historical timings
+above are MLX measurements, not cross-platform or audible-playback guarantees.
+
+## Requirements (MLX)
 
 - Apple Silicon Mac for the MLX backend. A libtorch (`tch`) backend exists for
   Linux/CUDA with dense bf16 weights.

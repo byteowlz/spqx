@@ -6,7 +6,7 @@
 //! This module implements the speech tokenizer decoder that converts
 //! discrete audio codes back to waveforms.
 
-#[cfg(feature = "mlx")]
+#[cfg(spqx_mlx)]
 use crate::backend::mlx;
 use crate::error::{Qwen3TTSError, Result};
 use crate::layers::KVCache;
@@ -741,7 +741,7 @@ impl VocoderAttention {
             (k, v)
         };
 
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         // The vocoder pre-transformer uses a sliding-window mask, which has no
         // fused mask mode — keep the additive array mask.
         let attn_output = Tensor::from_mlx(mlx::ops::fast_scaled_dot_product_attention(
@@ -754,7 +754,7 @@ impl VocoderAttention {
                 None => mlx::ops::SdpaMask::None,
             },
         ));
-        #[cfg(not(feature = "mlx"))]
+        #[cfg(not(spqx_mlx))]
         let attn_output = {
             let attn_weights = q.matmul(&k.transpose(-2, -1)) * self.scaling;
             let attn_weights = if let Some(mask) = attention_mask {

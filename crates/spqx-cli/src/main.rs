@@ -39,6 +39,18 @@ struct Cli {
 /// Global options shared by all subcommands.
 #[derive(Debug, Clone, Args)]
 pub struct CommonOpts {
+    /// Whole-pipeline engine (model format controls auto selection).
+    #[arg(long, value_enum, global = true, env = "SPQX_BACKEND")]
+    backend: Option<spqx_core::synthesis::Backend>,
+    /// Compute device: auto, cpu, cuda:0, vulkan:0, or GGML device name.
+    #[arg(long, global = true, env = "SPQX_DEVICE")]
+    device: Option<String>,
+    /// Trusted pinned GGML runtime library path.
+    #[arg(long, global = true, env = "SPQX_ENGINE_LIBRARY")]
+    engine_library: Option<PathBuf>,
+    /// GGML codec/tokenizer GGUF path.
+    #[arg(long, global = true, env = "SPQX_CODEC")]
+    codec: Option<PathBuf>,
     /// Override the config file path (also: SPQX_CONFIG)
     #[arg(long, value_name = "PATH", global = true, env = "SPQX_CONFIG")]
     config: Option<PathBuf>,
@@ -60,6 +72,25 @@ pub struct CommonOpts {
     /// Assume "yes" for prompts
     #[arg(short = 'y', long = "yes", global = true)]
     yes: bool,
+}
+
+impl CommonOpts {
+    fn load_config(&self) -> Result<Config> {
+        let mut config = Config::load(self.config.as_deref())?;
+        if let Some(backend) = self.backend {
+            config.engine.backend = backend;
+        }
+        if let Some(device) = &self.device {
+            config.engine.device = device.clone();
+        }
+        if let Some(path) = &self.engine_library {
+            config.engine.library = Some(path.clone());
+        }
+        if let Some(path) = &self.codec {
+            config.engine.codec = Some(path.clone());
+        }
+        Ok(config)
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -134,7 +165,7 @@ fn init_logging(common: &CommonOpts) {
 fn run_config(command: ConfigCommand, common: &CommonOpts) -> Result<()> {
     match command {
         ConfigCommand::Show => {
-            let config = Config::load(common.config.as_deref())?;
+            let config = common.load_config()?;
             let out = if common.json {
                 serde_json::to_string_pretty(&config)?
             } else {

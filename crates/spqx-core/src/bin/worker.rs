@@ -16,12 +16,31 @@ const DEFAULT_REF_TEXT: &str = "I'm confused why some people have super short ti
 const DEFAULT_MAX_NEW_TOKENS: i64 = 1536;
 const DEFAULT_BLOCKSIZE: usize = 512;
 
+#[derive(clap::Args, Debug)]
+struct EngineArgs {
+    /// Whole-pipeline execution engine.
+    #[arg(long, value_enum, default_value = "auto")]
+    backend: spqx_core::synthesis::Backend,
+    /// Pinned GGML runtime library.
+    #[arg(long)]
+    engine_library: Option<PathBuf>,
+    /// GGML codec/tokenizer GGUF.
+    #[arg(long)]
+    codec: Option<PathBuf>,
+    /// Compute device (honored, unlike the old compatibility flag).
+    #[arg(long, default_value = "auto")]
+    device: String,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "spqx-tts-worker",
     about = "Persistent Qwen3 TTS binary-framed worker"
 )]
 struct Args {
+    #[command(flatten)]
+    engine: EngineArgs,
+
     /// Run as a persistent binary-framed worker on stdin/stdout.
     #[arg(long)]
     serve: bool,
@@ -115,10 +134,6 @@ struct Args {
     speed: f64,
 
     /// Accepted for Python worker CLI compatibility.
-    #[arg(long, default_value = "cuda")]
-    device: String,
-
-    /// Accepted for Python worker CLI compatibility.
     #[arg(long, default_value = "auto")]
     dtype: String,
 
@@ -142,7 +157,7 @@ struct Args {
 fn expanduser(path: &std::path::Path) -> PathBuf {
     let text = path.to_string_lossy();
     if let Some(rest) = text.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
             return PathBuf::from(home).join(rest);
         }
     }
@@ -151,7 +166,9 @@ fn expanduser(path: &std::path::Path) -> PathBuf {
 
 fn resolve_ref_text(args: &Args) -> anyhow::Result<String> {
     if let Some(path) = &args.ref_text_file {
-        return Ok(std::fs::read_to_string(expanduser(path))?.trim().to_string());
+        return Ok(std::fs::read_to_string(expanduser(path))?
+            .trim()
+            .to_string());
     }
     if let Some(text) = &args.ref_text {
         return Ok(text.trim().to_string());
@@ -174,14 +191,31 @@ fn main() -> anyhow::Result<()> {
         streaming_chunk_size: args.streaming_chunk_size.unwrap_or(4).max(1) as usize,
     };
 
+    let options = spqx_core::synthesis::EngineOptions {
+        backend: args.engine.backend,
+        device: args.engine.device.clone(),
+        library: args.engine.engine_library.clone(),
+        codec: args.engine.codec.clone(),
+    };
+    let default_engine = options == spqx_core::synthesis::EngineOptions::default();
     if args.serve {
-        worker::run_stdio(config)
+        if default_engine {
+            worker::run_stdio(config)
+        } else {
+            worker::run_stdio_with_engine(config, options)
+        }
     } else {
         let text = match (&args.text, &args.text_file) {
             (Some(text), _) => text.trim().to_string(),
-            (None, Some(file)) => std::fs::read_to_string(expanduser(file))?.trim().to_string(),
+            (None, Some(file)) => std::fs::read_to_string(expanduser(file))?
+                .trim()
+                .to_string(),
             (None, None) => anyhow::bail!("provide --text or --text-file"),
         };
-        worker::generate_to_wav(&config, &text, &expanduser(&args.output))
+        if default_engine {
+            worker::generate_to_wav(&config, &text, &expanduser(&args.output))
+        } else {
+            worker::generate_to_wav_with_engine(&config, &options, &text, &expanduser(&args.output))
+        }
     }
 }

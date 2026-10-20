@@ -1,5 +1,6 @@
 [package]
 name = "spqx-core"
+autobins = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -31,11 +32,11 @@ hound = "3.5"
 # 0.5.x tree already pulled in by rodio (spqx-cli) to avoid a duplicate dep.
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "vorbis", "aac", "ogg", "isomp4"] }
 rubato = "0.16"
-mp3lame-encoder = "0.2"
-flacenc = "0.5"
-audiopus = "0.2"
-audiopus_sys = { version = "0.1", features = ["static"] }
-ogg = "0.9"
+mp3lame-encoder = { version = "0.2", optional = true }
+flacenc = { version = "0.5", optional = true }
+audiopus = { version = "0.2", optional = true }
+audiopus_sys = { version = "0.1", features = ["static"], optional = true }
+ogg = { version = "0.9", optional = true }
 
 # HTTP and file handling
 base64 = "0.22"
@@ -44,26 +45,39 @@ url = "2.5"
 # Error handling
 thiserror = "2.0"
 anyhow = "1.0"
+libloading = { version = "0.8", optional = true }
+schemars = "0.8"
 
 # Logging
 tracing = "0.1"
 
 # API server
-axum = { version = "0.8", features = ["multipart"] }
-tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
-async-stream = "0.3"
+axum = { version = "0.8", features = ["multipart"], optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+tokio-stream = { version = "0.1", optional = true }
+async-stream = { version = "0.3", optional = true }
 clap = { version = "4", features = ["derive"] }
-tower-http = { version = "0.6", features = ["trace"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower-http = { version = "0.6", features = ["trace"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 [features]
-default = ["tch-backend"]
-# Use libtorch/PyTorch as the computation backend (default)
+default = ["mlx", "qwentts", "legacy-api"]
+# Whole-pipeline portable runtime, loaded from a pinned native library.
+qwentts = ["dep:libloading"]
+# Legacy tensor-level diagnostic/example binaries.
+legacy-tools = ["legacy-api"]
+# Optional HTTP/multi-format encoder surface. Portable CLI/worker releases omit
+# this feature, so they do not compile or statically link the LGPL LAME encoder.
+legacy-api = ["dep:mp3lame-encoder", "dep:flacenc", "dep:audiopus", "dep:audiopus_sys", "dep:ogg", "dep:axum", "dep:tokio", "dep:tokio-stream", "dep:async-stream", "dep:tower-http", "dep:tracing-subscriber"]
+# Optional legacy dense libtorch/PyTorch tensor backend.
 tch-backend = ["dep:tch"]
 # Use Apple MLX as the computation backend (macOS Apple Silicon only).
 # Requires the mlx-c git submodule: `git submodule update --init --recursive`
 mlx = []
+
+[[example]]
+name = "test_weights"
+required-features = ["legacy-tools"]
 
 [build-dependencies]
 cmake = "0.1"
@@ -71,14 +85,17 @@ cmake = "0.1"
 [[bin]]
 name = "tts"
 path = "src/bin/tts.rs"
+required-features = ["legacy-tools"]
 
 [[bin]]
 name = "voice_clone"
 path = "src/bin/voice_clone.rs"
+required-features = ["legacy-tools"]
 
 [[bin]]
 name = "api_server"
 path = "src/bin/api_server.rs"
+required-features = ["legacy-tools"]
 
 [[bin]]
 name = "spqx-tts-worker"
@@ -92,10 +109,17 @@ path = "src/bin/worker.rs"
 [[bin]]
 name = "qwen3-tts"
 path = "src/bin/qwen3_tts_cli.rs"
+required-features = ["legacy-tools"]
 
 [[bin]]
 name = "trace_vocoder"
 path = "src/bin/trace_vocoder.rs"
+required-features = ["legacy-tools"]
+
+[[bin]]
+name = "trace_rust"
+path = "src/bin/trace_rust.rs"
+required-features = ["legacy-tools"]
 
 [dev-dependencies]
 tempfile = "3.14"

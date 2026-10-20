@@ -54,7 +54,7 @@ fn main() -> anyhow::Result<()> {
     println!();
 
     // Initialize MLX backend with GPU (Metal) when using the mlx feature
-    #[cfg(feature = "mlx")]
+    #[cfg(spqx_mlx)]
     {
         spqx_core::backend::mlx::stream::init_mlx(true);
         println!("MLX backend initialized (Metal GPU)");

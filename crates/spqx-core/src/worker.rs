@@ -11,9 +11,7 @@
 //! flags and the CLI constructs it from its config + flags — one code path.
 
 use std::collections::HashSet;
-use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -23,29 +21,27 @@ use std::time::Instant;
 use anyhow::Result;
 use serde_json::json;
 
-use crate::audio::{load_wav_file, resample, write_wav_file};
-use crate::audio_encoder::AudioEncoder;
-use crate::inference::{IclSession, TTSInference};
-use crate::speaker_encoder::SpeakerEncoder;
-use crate::tensor::{Device, Tensor};
+use crate::audio::{resample, write_wav_file};
+use crate::synthesis::{EngineOptions, Sampling, Stop};
 
 const FRAME_HEADER_BYTES: usize = 9;
-const STDOUT_FILENO: i32 = 1;
-const STDERR_FILENO: i32 = 2;
 
+/// Input frame containing UTF-8 synthesis text.
 pub const WORKER_INPUT_SPEAK: u8 = 1;
+/// Input frame cancelling its request ID.
 pub const WORKER_INPUT_CANCEL: u8 = 2;
+/// Input frame requesting worker shutdown.
 pub const WORKER_INPUT_SHUTDOWN: u8 = 3;
+/// Model/reference initialization completed.
 pub const WORKER_OUTPUT_READY: u8 = 1;
+/// Output stream sample rate announcement.
 pub const WORKER_OUTPUT_AUDIO_START: u8 = 2;
+/// Output mono PCM16 audio bytes.
 pub const WORKER_OUTPUT_AUDIO_CHUNK: u8 = 3;
+/// Terminal successful/cancelled request acknowledgement.
 pub const WORKER_OUTPUT_AUDIO_DONE: u8 = 4;
+/// Terminal request or startup error.
 pub const WORKER_OUTPUT_ERROR: u8 = 5;
-
-extern "C" {
-    fn dup(fd: i32) -> i32;
-    fn dup2(oldfd: i32, newfd: i32) -> i32;
-}
 
 /// Everything needed to build a worker. Resolved by the caller (binary or CLI)
 /// from flags/config — no config-file reading happens here.
@@ -59,11 +55,17 @@ pub struct WorkerConfig {
     pub ref_text: String,
     /// Target language (already normalized; `auto` allowed).
     pub language: String,
+    /// Sampling temperature.
     pub temperature: f64,
+    /// Top-k sampling limit.
     pub top_k: i64,
+    /// Maximum generated codec frames.
     pub max_new_tokens: i64,
+    /// Framed PCM output rate in Hz.
     pub output_sample_rate: u32,
+    /// Maximum output block size in samples.
     pub blocksize: usize,
+    /// Native Rust engine codec-frame chunk width; GGML uses its own ramp.
     pub streaming_chunk_size: usize,
 }
 
@@ -74,14 +76,12 @@ struct Frame {
 }
 
 struct BinaryWriter {
-    inner: File,
+    inner: crate::stdio::Descriptor,
 }
 
 impl BinaryWriter {
-    fn new(fd: RawFd) -> Self {
-        Self {
-            inner: unsafe { File::from_raw_fd(fd) },
-        }
+    fn new(inner: crate::stdio::Descriptor) -> Self {
+        Self { inner }
     }
 
     fn write_frame(&mut self, frame_type: u8, request_id: u32, payload: &[u8]) -> Result<()> {
@@ -99,16 +99,7 @@ impl BinaryWriter {
 
 struct Worker {
     model_name: String,
-    inference: TTSInference,
-    icl_session: IclSession,
-    #[allow(dead_code)]
-    speaker_embedding: Tensor,
-    #[allow(dead_code)]
-    ref_codes: Vec<Vec<i64>>,
-    #[allow(dead_code)]
-    ref_text: String,
-    #[allow(dead_code)]
-    language: String,
+    engine: crate::synthesis::Session,
     temperature: f64,
     top_k: i64,
     max_new_tokens: i64,
@@ -118,58 +109,17 @@ struct Worker {
 }
 
 impl Worker {
-    fn load(config: &WorkerConfig) -> Result<Self> {
-        #[cfg(feature = "mlx")]
-        {
-            crate::backend::mlx::stream::init_mlx(true);
-            eprintln!("MLX backend initialized (Metal GPU)");
-        }
-
-        if !config.model_path.exists() {
-            anyhow::bail!(
-                "worker requires a local model directory, got {}",
-                config.model_path.display()
-            );
-        }
-
-        let device = Device::Cpu;
-        let inference = TTSInference::new(&config.model_path, device)?;
-        let speaker_encoder = SpeakerEncoder::load(
-            inference.weights(),
-            &inference.config().speaker_encoder_config,
-            device,
-        )?;
-        let tokenizer_path = config
-            .model_path
-            .join("speech_tokenizer")
-            .join("model.safetensors");
-        let audio_encoder = AudioEncoder::load(&tokenizer_path, device)?;
-        let se_sr = inference.config().speaker_encoder_config.sample_rate;
-        let (samples, sample_rate) = load_wav_file(path_str(&config.ref_audio)?)?;
-        let samples = if sample_rate == se_sr {
-            samples
-        } else {
-            resample(&samples, sample_rate, se_sr)?
-        };
-        let speaker_embedding = speaker_encoder.extract_embedding(&samples)?;
-        let ref_codes = audio_encoder.encode(&samples)?;
-        // Precompute the reference side of the ICL prompt once; requests only
-        // pay for their own synthesis tokens.
-        let icl_session = inference.prepare_icl_session(
+    fn load(config: &WorkerConfig, options: &crate::synthesis::EngineOptions) -> Result<Self> {
+        let engine = crate::synthesis::Session::load(
+            &config.model_path,
+            &config.ref_audio,
             &config.ref_text,
-            &ref_codes,
-            &speaker_embedding,
             &config.language,
+            options,
         )?;
-
         Ok(Self {
             model_name: config.model_path.display().to_string(),
-            inference,
-            icl_session,
-            speaker_embedding,
-            ref_codes,
-            ref_text: config.ref_text.clone(),
-            language: config.language.clone(),
+            engine,
             temperature: config.temperature,
             top_k: config.top_k,
             max_new_tokens: config.max_new_tokens,
@@ -204,10 +154,11 @@ impl Worker {
 
         log_json(json!({
             "type": "ready",
-            "backend": "rust_mlx",
+            "backend": self.engine.backend_name(),
             "model": self.model_name,
             "modelType": "base",
             "chunkSize": self.streaming_chunk_size,
+            "chunkSizeScope": "configured_native_rust_engine_only",
             "maxNewTokens": self.max_new_tokens,
             "temperature": self.temperature,
             "topK": self.top_k,
@@ -217,18 +168,18 @@ impl Worker {
         let mut streamer = PcmStreamer::new(self.output_sample_rate, self.blocksize);
         let mut ttfa_logged = false;
         let mut stream_error: Option<anyhow::Error> = None;
-        let mut cancelled_during_stream = false;
 
-        let stop = self.inference.generate_with_icl_session_streaming(
-            &self.icl_session,
+        let sampling = Sampling {
+            temperature: self.temperature,
+            top_k: self.top_k,
+            max_new_tokens: self.max_new_tokens,
+            chunk_size: self.streaming_chunk_size,
+        };
+        let stop = self.engine.synthesize(
             text,
-            self.temperature,
-            self.top_k,
-            self.max_new_tokens,
-            self.streaming_chunk_size,
+            &sampling,
             |samples, sample_rate| {
                 if take_cancelled(cancelled, request_id) {
-                    cancelled_during_stream = true;
                     return false;
                 }
                 let gated;
@@ -255,14 +206,23 @@ impl Worker {
                 }
                 true
             },
+            || {
+                cancelled
+                    .lock()
+                    .map(|set| set.contains(&request_id))
+                    .unwrap_or(true)
+            },
         )?;
         if let Some(error) = stream_error {
             return Err(error);
         }
-        if cancelled_during_stream {
+        // Also honor cancellation arriving after the engine's last callback.
+        let stop = stop.after_callback(!take_cancelled(cancelled, request_id));
+        if stop == Stop::Cancelled {
             log_json(json!({ "type": "request_cancelled", "id": request_id }));
             writer.write_frame(WORKER_OUTPUT_AUDIO_DONE, request_id, &[])?;
-            clear_mlx_cache();
+            clear_cancelled(cancelled, request_id);
+            self.engine.clear_cache();
             return Ok(());
         }
         streamer.finish(request_id, writer)?;
@@ -280,7 +240,7 @@ impl Worker {
             "label": "voice_clone_rust"
         }));
         clear_cancelled(cancelled, request_id);
-        clear_mlx_cache();
+        self.engine.clear_cache();
 
         // The audio is already streamed, so this cannot un-send it — but the
         // caller must not treat a truncated or collapsed utterance as a
@@ -405,16 +365,13 @@ impl PcmStreamer {
 /// chatter to stderr so the real stdout carries only binary frames. Blocks
 /// until a shutdown frame or EOF.
 pub fn run_stdio(config: WorkerConfig) -> Result<()> {
-    let stdout_fd = unsafe { dup(STDOUT_FILENO) };
-    if stdout_fd < 0 {
-        anyhow::bail!("failed to duplicate stdout");
-    }
-    if unsafe { dup2(STDERR_FILENO, STDOUT_FILENO) } < 0 {
-        anyhow::bail!("failed to redirect stdout to stderr");
-    }
-    let mut writer = BinaryWriter::new(stdout_fd);
+    run_stdio_with_engine(config, EngineOptions::default())
+}
 
-    match Worker::load(&config) {
+/// Run the unchanged frame protocol using an explicitly selected engine.
+pub fn run_stdio_with_engine(config: WorkerConfig, options: EngineOptions) -> Result<()> {
+    let mut writer = BinaryWriter::new(crate::stdio::framed_stdout()?);
+    match Worker::load(&config, &options) {
         Ok(worker) => serve(worker, &mut writer),
         Err(error) => {
             let _ = writer.write_frame(WORKER_OUTPUT_ERROR, 0, error.to_string().as_bytes());
@@ -423,25 +380,47 @@ pub fn run_stdio(config: WorkerConfig) -> Result<()> {
     }
 }
 
-/// One-shot synthesis to a WAV file (no frame protocol).
+/// One-shot synthesis using the default engine policy.
 pub fn generate_to_wav(config: &WorkerConfig, text: &str, output: &Path) -> Result<()> {
-    let worker = Worker::load(config)?;
-    let (samples, sample_rate) = worker.inference.generate_with_icl(
-        text,
-        &config.ref_text,
-        &worker.ref_codes,
-        &worker.speaker_embedding,
-        &config.language,
-        config.temperature,
-        config.top_k,
-        config.max_new_tokens,
-    )?;
-    let samples = if sample_rate == config.output_sample_rate {
-        samples
-    } else {
-        resample(&samples, sample_rate, config.output_sample_rate)?
+    generate_to_wav_with_engine(config, &EngineOptions::default(), text, output)
+}
+
+/// One-shot synthesis through the same prepared engine used by the worker.
+pub fn generate_to_wav_with_engine(
+    config: &WorkerConfig,
+    options: &EngineOptions,
+    text: &str,
+    output: &Path,
+) -> Result<()> {
+    let _stdout_guard = crate::stdio::StdoutGuard::new()?;
+    let worker = Worker::load(config, options)?;
+    let sampling = Sampling {
+        temperature: config.temperature,
+        top_k: config.top_k,
+        max_new_tokens: config.max_new_tokens,
+        chunk_size: config.streaming_chunk_size.max(1),
     };
-    write_wav_file(path_str(output)?, &samples, config.output_sample_rate)?;
+    let mut audio = Vec::new();
+    let mut sample_rate = 24000;
+    let stop = worker.engine.synthesize(
+        text,
+        &sampling,
+        |samples, rate| {
+            sample_rate = rate;
+            audio.extend_from_slice(samples);
+            true
+        },
+        || false,
+    )?;
+    let audio = if sample_rate == config.output_sample_rate {
+        audio
+    } else {
+        resample(&audio, sample_rate, config.output_sample_rate)?
+    };
+    write_wav_file(path_str(output)?, &audio, config.output_sample_rate)?;
+    if stop.truncated() {
+        anyhow::bail!("generation hit frame cap; partial WAV saved");
+    }
     Ok(())
 }
 
@@ -477,7 +456,7 @@ fn serve(worker: Worker, writer: &mut BinaryWriter) -> Result<()> {
     writer.write_frame(WORKER_OUTPUT_READY, 0, &[])?;
     log_json(json!({
         "type": "server_ready",
-        "backend": "rust_mlx",
+        "backend": worker.engine.backend_name(),
         "model": worker.model_name
     }));
 
@@ -607,7 +586,7 @@ fn log_json(value: serde_json::Value) {
 /// `CapReached` means no EOS, so the utterance is cut off. A long silent tail
 /// means the model stopped speaking but kept emitting frames. Both produce a
 /// WAV that looks fine to the caller.
-fn degenerate_reason(stop: crate::inference::Stop, trailing_s: f64) -> Option<String> {
+fn degenerate_reason(stop: Stop, trailing_s: f64) -> Option<String> {
     const MAX_TRAILING_S: f64 = 3.0;
     if stop.truncated() {
         return Some(
@@ -623,13 +602,6 @@ fn degenerate_reason(stop: crate::inference::Stop, trailing_s: f64) -> Option<St
         ));
     }
     None
-}
-
-fn clear_mlx_cache() {
-    #[cfg(feature = "mlx")]
-    unsafe {
-        crate::backend::mlx::ffi::mlx_clear_cache();
-    }
 }
 
 fn round3(value: f64) -> f64 {

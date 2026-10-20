@@ -6,7 +6,7 @@
 //! This module implements the core neural network layers used by the
 //! TTS model, including attention, MLP, normalization, and vocoder layers.
 
-#[cfg(feature = "mlx")]
+#[cfg(spqx_mlx)]
 use crate::backend::mlx;
 use crate::tensor::{DType, Device, Tensor};
 use crate::trace::TraceWriter;
@@ -39,7 +39,7 @@ impl RMSNorm {
     /// Apply RMS normalization.
     pub fn forward(&self, x: &Tensor) -> Tensor {
         // Use MLX fused RMS norm kernel for better performance on Apple Silicon
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         {
             return Tensor::from_mlx(mlx::ops::fast_rms_norm(
                 x.as_mlx(),
@@ -48,7 +48,7 @@ impl RMSNorm {
             ))
             .to_dtype(x.kind());
         }
-        #[cfg(not(feature = "mlx"))]
+        #[cfg(not(spqx_mlx))]
         {
             let x_f32 = x.to_dtype(DType::Float32);
 
@@ -72,11 +72,11 @@ impl RMSNorm {
 pub struct Linear {
     weight: Tensor,
     bias: Option<Tensor>,
-    #[cfg(feature = "mlx")]
+    #[cfg(spqx_mlx)]
     quantization: Option<QuantizedLinear>,
 }
 
-#[cfg(feature = "mlx")]
+#[cfg(spqx_mlx)]
 struct QuantizedLinear {
     scales: Tensor,
     biases: Option<Tensor>,
@@ -122,7 +122,7 @@ impl Linear {
         let bias = weights
             .get(&format!("{prefix}.bias"))
             .map(|tensor| tensor.to_device(device));
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         {
             let scales = weights
                 .get(&format!("{prefix}.scales"))
@@ -132,7 +132,7 @@ impl Linear {
                 .map(|tensor| tensor.to_device(device));
             return Some(Self::from_parts(weight, bias, scales, quant_biases));
         }
-        #[cfg(not(feature = "mlx"))]
+        #[cfg(not(spqx_mlx))]
         {
             Some(Self::from_parts(weight, bias, None, None))
         }
@@ -141,12 +141,12 @@ impl Linear {
     fn from_parts(
         weight: Tensor,
         bias: Option<Tensor>,
-        #[cfg(feature = "mlx")] scales: Option<Tensor>,
-        #[cfg(feature = "mlx")] quant_biases: Option<Tensor>,
-        #[cfg(not(feature = "mlx"))] _scales: Option<Tensor>,
-        #[cfg(not(feature = "mlx"))] _quant_biases: Option<Tensor>,
+        #[cfg(spqx_mlx)] scales: Option<Tensor>,
+        #[cfg(spqx_mlx)] quant_biases: Option<Tensor>,
+        #[cfg(not(spqx_mlx))] _scales: Option<Tensor>,
+        #[cfg(not(spqx_mlx))] _quant_biases: Option<Tensor>,
     ) -> Self {
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         {
             if let Some(scales) = scales {
                 let quantization =
@@ -170,7 +170,7 @@ impl Linear {
                 quantization: None,
             }
         }
-        #[cfg(not(feature = "mlx"))]
+        #[cfg(not(spqx_mlx))]
         {
             Self {
                 weight: linear_weight(weight),
@@ -181,7 +181,7 @@ impl Linear {
 
     /// Apply linear transformation: x @ W^T + bias.
     pub fn forward(&self, x: &Tensor) -> Tensor {
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         let out = if let Some(quantization) = &self.quantization {
             Tensor::from_mlx(mlx::ops::quantized_matmul(
                 x.as_mlx(),
@@ -196,11 +196,11 @@ impl Linear {
         } else {
             x.matmul(&self.weight.tr())
         };
-        #[cfg(not(feature = "mlx"))]
+        #[cfg(not(spqx_mlx))]
         let out = x.matmul(&self.weight.tr());
 
         if let Some(ref bias) = self.bias {
-            #[cfg(feature = "mlx")]
+            #[cfg(spqx_mlx)]
             {
                 if self.quantization.is_some() {
                     return &out + bias;
@@ -211,7 +211,7 @@ impl Linear {
                     self.weight.tr().as_mlx(),
                 ));
             }
-            #[cfg(not(feature = "mlx"))]
+            #[cfg(not(spqx_mlx))]
             {
                 &out + bias
             }
@@ -221,7 +221,7 @@ impl Linear {
     }
 }
 
-#[cfg(feature = "mlx")]
+#[cfg(spqx_mlx)]
 fn infer_quantization(weight: &Tensor, scales: &Tensor) -> Option<(i32, i32)> {
     let weight_shape = weight.size();
     let scale_shape = scales.size();
@@ -242,7 +242,7 @@ fn infer_quantization(weight: &Tensor, scales: &Tensor) -> Option<(i32, i32)> {
     }
 }
 
-#[cfg(not(feature = "mlx"))]
+#[cfg(not(spqx_mlx))]
 fn linear_weight(weight: Tensor) -> Tensor {
     weight.to_dtype(DType::Float32)
 }
@@ -284,7 +284,7 @@ impl KVCache {
     }
 
     /// Append new key/value tensors and return populated cache slices.
-    #[cfg(feature = "mlx")]
+    #[cfg(spqx_mlx)]
     pub fn update_and_fetch(&mut self, key: Tensor, value: Tensor) -> (Tensor, Tensor) {
         let key_shape = key.size();
         let value_shape = value.size();
@@ -331,7 +331,7 @@ impl KVCache {
     }
 
     /// Append new key/value tensors and return populated cache slices.
-    #[cfg(not(feature = "mlx"))]
+    #[cfg(not(spqx_mlx))]
     pub fn update_and_fetch(&mut self, key: Tensor, value: Tensor) -> (Tensor, Tensor) {
         let key = if let Some(previous_key) = &self.key {
             Tensor::cat(&[previous_key.shallow_clone(), key], 2)
@@ -350,7 +350,7 @@ impl KVCache {
         (key, value)
     }
 
-    #[cfg(feature = "mlx")]
+    #[cfg(spqx_mlx)]
     fn update_slice(
         &self,
         cache: &Tensor,
@@ -604,7 +604,7 @@ impl Attention {
 
         // Apply Q/K normalization if present (RMS norm per head).
         let query = if let Some(ref q_norm) = self.q_norm {
-            #[cfg(feature = "mlx")]
+            #[cfg(spqx_mlx)]
             {
                 Tensor::from_mlx(mlx::ops::fast_rms_norm(
                     query.as_mlx(),
@@ -612,7 +612,7 @@ impl Attention {
                     1e-6,
                 ))
             }
-            #[cfg(not(feature = "mlx"))]
+            #[cfg(not(spqx_mlx))]
             {
                 let variance = query.pow_scalar(2.0).mean_dim(&[-1], true);
                 let rms = (variance + 1e-6).sqrt().clamp_min(1e-8);
@@ -623,11 +623,11 @@ impl Attention {
             query
         };
         let key = if let Some(ref k_norm) = self.k_norm {
-            #[cfg(feature = "mlx")]
+            #[cfg(spqx_mlx)]
             {
                 Tensor::from_mlx(mlx::ops::fast_rms_norm(key.as_mlx(), k_norm.as_mlx(), 1e-6))
             }
-            #[cfg(not(feature = "mlx"))]
+            #[cfg(not(spqx_mlx))]
             {
                 let variance = key.pow_scalar(2.0).mean_dim(&[-1], true);
                 let rms = (variance + 1e-6).sqrt().clamp_min(1e-8);
@@ -645,7 +645,7 @@ impl Attention {
         // Tch attention below does not support grouped-query attention directly,
         // so expand KV heads there. MLX SDPA supports GQA and is faster without
         // materializing repeated KV heads.
-        #[cfg(not(feature = "mlx"))]
+        #[cfg(not(spqx_mlx))]
         let (key, value) = if self.num_kv_heads != self.num_heads {
             let repeat_factor = self.num_heads / self.num_kv_heads;
             let key = key
@@ -678,7 +678,7 @@ impl Attention {
         } else {
             (key, value)
         };
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         let (key, value) = (key, value);
 
         let (key, value) = if let Some(cache) = cache {
@@ -688,7 +688,7 @@ impl Attention {
         };
 
         // Compute attention
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         let attn_output = {
             // Use MLX fused scaled dot-product attention kernel. Every
             // materialized mask this engine passes to the talker/predictor is
@@ -707,7 +707,7 @@ impl Attention {
                 mask,
             ))
         };
-        #[cfg(not(feature = "mlx"))]
+        #[cfg(not(spqx_mlx))]
         let attn_output = {
             let scale = (self.head_dim as f64).sqrt();
             let attn_weights = query.matmul(&key.transpose(-2, -1)) / scale;
@@ -765,7 +765,7 @@ impl Attention {
             .view(&[batch_size, seq_len, self.num_kv_heads, self.head_dim])
             .transpose(1, 2);
         let query = if let Some(ref q_norm) = self.q_norm {
-            #[cfg(feature = "mlx")]
+            #[cfg(spqx_mlx)]
             {
                 Tensor::from_mlx(mlx::ops::fast_rms_norm(
                     query.as_mlx(),
@@ -773,7 +773,7 @@ impl Attention {
                     1e-6,
                 ))
             }
-            #[cfg(not(feature = "mlx"))]
+            #[cfg(not(spqx_mlx))]
             {
                 let variance = query.pow_scalar(2.0).mean_dim(&[-1], true);
                 let rms = (variance + 1e-6).sqrt().clamp_min(1e-8);
@@ -783,11 +783,11 @@ impl Attention {
             query
         };
         let key = if let Some(ref k_norm) = self.k_norm {
-            #[cfg(feature = "mlx")]
+            #[cfg(spqx_mlx)]
             {
                 Tensor::from_mlx(mlx::ops::fast_rms_norm(key.as_mlx(), k_norm.as_mlx(), 1e-6))
             }
-            #[cfg(not(feature = "mlx"))]
+            #[cfg(not(spqx_mlx))]
             {
                 let variance = key.pow_scalar(2.0).mean_dim(&[-1], true);
                 let rms = (variance + 1e-6).sqrt().clamp_min(1e-8);
@@ -809,7 +809,7 @@ impl Attention {
         };
         trace.tensor(&format!("{prefix}/cache_key"), &key)?;
         trace.tensor(&format!("{prefix}/cache_value"), &value)?;
-        #[cfg(feature = "mlx")]
+        #[cfg(spqx_mlx)]
         let attn_output = {
             let scale = 1.0 / (self.head_dim as f64).sqrt();
             // Traced path keeps the additive array mask so trace tensors stay
@@ -826,7 +826,7 @@ impl Attention {
                 mask,
             ))
         };
-        #[cfg(not(feature = "mlx"))]
+        #[cfg(not(spqx_mlx))]
         let attn_output = {
             let scale = (self.head_dim as f64).sqrt();
             let attn_weights = query.matmul(&key.transpose(-2, -1)) / scale;
@@ -1291,7 +1291,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "mlx"))]
+#[cfg(all(test, spqx_mlx))]
 mod qmm_bench {
     use super::*;
     use crate::tensor::{DType, Device, Tensor};

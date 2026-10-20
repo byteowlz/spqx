@@ -1,0 +1,32 @@
+name: Portable CLI and worker
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: portable-contract-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+jobs:
+  model-free:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install macOS audio build dependencies
+        if: runner.os == 'macOS'
+        run: brew install automake autoconf libtool
+      - name: Test portable-only Rust path without models or accelerator allocation
+        run: cargo test --locked -p spqx-core -p spqx-cli --no-default-features --features qwentts --lib --bins --tests
+      - name: Install Linux playback build dependency
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Check default backend selection on this target
+        if: runner.os != 'macOS'
+        run: cargo check --locked -p spqx-core -p spqx-cli
+# These jobs validate Rust/CRT/config/framing only, not native runtime packaging,
+# CUDA/Vulkan support, speech quality, playback, or Windows libqwen inference.
