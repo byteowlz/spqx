@@ -85,7 +85,7 @@ def rust_materials(stage, target, features):
 def unix_launcher(stage, name):
     path = stage / "bin" / name
     path.rename(path.with_name(name + "-real"))
-    path.write_text('#!/usr/bin/env bash\nset -euo pipefail\nhere=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)\n'
+    path.write_text('#!/usr/bin/env bash\nset -euo pipefail\nhere=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)\n'
                     'export LD_LIBRARY_PATH="$here/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
                     'exec "$here/' + name + '-real" "$@"\n')
     path.chmod(0o755)
@@ -96,7 +96,7 @@ def installers(stage, name, windows):
         (stage / "install.cmd").write_bytes((
             '@echo off\r\nsetlocal\r\nset "DEST=%~1"\r\n'
             'if not defined DEST set "DEST=%LOCALAPPDATA%\\Programs\\spqx\\' + name + '"\r\n'
-            'if exist "%DEST%\\manifest.json" (echo Destination already installed & exit /b 2)\r\n'
+            'if exist "%DEST%" (echo Destination already exists & exit /b 2)\r\n'
             'mkdir "%DEST%" 2>nul\r\nxcopy "%~dp0*" "%DEST%\\" /E /I /Y >nul\r\n'
             'if errorlevel 1 exit /b 1\r\necho Installed: %DEST%\\bin\\spqx.exe\r\n'
             'echo Existing configuration and PATH were not modified.\r\n').encode())
@@ -190,13 +190,21 @@ def package(args):
     manifest = {"schema_version": 1, "source_revision": revision, "target": args.target, "backend": args.backend,
                 "features": args.features.split(","), "requirements": args.requirement,
                 "models_included": False, "recordings_included": False, "rust_dependencies": records}
-    manifest["files"] = {str(p.relative_to(stage)): {"symlink": os.readlink(p)} if p.is_symlink()
+    manifest["files"] = {p.relative_to(stage).as_posix(): {"symlink": os.readlink(p)} if p.is_symlink()
                          else {"sha256": digest(p), "bytes": p.stat().st_size}
                          for p in sorted(stage.rglob("*")) if p.is_file() or p.is_symlink()}
     (stage / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    archive = write_archive(stage, windows)
+    archive.with_name(archive.name + ".sha256").write_text(digest(archive) + "  " + archive.name + "\n")
+    print(json.dumps({"bundle": str(archive), "sha256": digest(archive), "manifest": str(stage / "manifest.json")}))
+    return stage
+
+
+def write_archive(stage, windows):
+    name = stage.name
     if windows:
         archive = stage.with_suffix(".zip")
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipped:
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, strict_timestamps=False) as zipped:
             for p in sorted(stage.rglob("*")):
                 if p.is_file():
                     zipped.write(p, str(Path(name) / p.relative_to(stage)))
@@ -204,9 +212,7 @@ def package(args):
         archive = stage.with_suffix(".tar.gz")
         with tarfile.open(archive, "w:gz") as tar:
             tar.add(stage, arcname=name, filter=lambda info: _neutral_owner(info))
-    archive.with_name(archive.name + ".sha256").write_text(digest(archive) + "  " + archive.name + "\n")
-    print(json.dumps({"bundle": str(archive), "sha256": digest(archive), "manifest": str(stage / "manifest.json")}))
-    return stage
+    return archive
 
 
 def _neutral_owner(info):
@@ -230,6 +236,9 @@ def verify(stage):
                 raise ValueError("symlink mismatch: " + name)
         elif not path.is_file() or digest(path) != record["sha256"]:
             raise ValueError("file mismatch: " + name)
+    actual = {p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file() or p.is_symlink()}
+    if actual != set(manifest["files"]) | {"manifest.json"}:
+        raise ValueError("unrecorded or missing bundle files")
     return len(manifest["files"])
 
 
