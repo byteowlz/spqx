@@ -2,6 +2,12 @@ name: Portable Runtime Bundles
 on:
   workflow_call:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'scripts/**'
+      - 'Cargo.*'
+      - '.github/workflows/bundles.yml'
 permissions:
   contents: read
 jobs:
