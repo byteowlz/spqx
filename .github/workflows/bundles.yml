@@ -102,7 +102,13 @@ jobs:
       - name: Build CUDA 12 bundle without a GPU
         env:
           SPQX_CUDA_ARCHITECTURES: '89'
-        run: bash scripts/build-bundle.sh x86_64-unknown-linux-gnu cuda
+        run: |
+          # Checkout's temporary Git HOME differs inside this root container.
+          # Trust only this owned workspace, for this process and its children;
+          # never globally disable Git ownership checks or use safe.directory=*.
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory
+          export GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE"
+          bash scripts/build-bundle.sh x86_64-unknown-linux-gnu cuda
       - name: Verify and name artifact
         run: |
           uv run --no-project python - <<'PY'
