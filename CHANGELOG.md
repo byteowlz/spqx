@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Automatically fetch missing revision/SHA256-pinned GGML or MLX model profiles on CLI first use; add `spqx models download`, offline controls and configurable cache selection. Serialize concurrent downloads and atomically commit only verified files. No hosted inference, voice downloads or weights embedded in runtime releases.
+- Compile CUDA candidate kernels for both SM86 (RTX3070) and SM89 (RTX4090).
+
 - Add a shared prepared synthesis session and a pinned GGML/libqwen whole-pipeline engine behind the CLI and existing worker protocol; keep MLX on Apple Silicon.
 - Add explicit engine/device/codec/runtime-library config and flags, fail closed for unavailable requested devices, and cache GGML reference conditioning across requests.
 - Make portable-only builds independent of MLX/libtorch/playback. Restrict effective MLX compilation to Apple Silicon; add cross-platform CRT framing and Windows stdout-handle synchronization.

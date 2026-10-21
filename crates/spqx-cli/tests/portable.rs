@@ -29,6 +29,8 @@ impl Scratch {
             cmd.env(key, &self.0);
         }
         for key in [
+            "SPQX_OFFLINE",
+            "HF_HUB_OFFLINE",
             "SPQX_CONFIG",
             "SPQX_BACKEND",
             "SPQX_DEVICE",
@@ -39,6 +41,20 @@ impl Scratch {
         }
         cmd
     }
+    fn config(&self, args: &[&str]) -> serde_json::Value {
+        let output = self
+            .command()
+            .args(args)
+            .args(["--json", "config", "show"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
 }
 impl Drop for Scratch {
     fn drop(&mut self) {
@@ -48,27 +64,11 @@ impl Drop for Scratch {
 #[test]
 fn engine_flags_override_config_and_json_stays_clean() {
     let scratch = Scratch::new();
-    let output = scratch
-        .command()
-        .args([
-            "--json",
-            "--backend",
-            "ggml",
-            "--device",
-            "cpu",
-            "config",
-            "show",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let value = scratch.config(&["--backend", "ggml", "--device", "cpu", "--offline"]);
     assert_eq!(value["engine"]["backend"], "ggml");
     assert_eq!(value["engine"]["device"], "cpu");
+    assert_eq!(value["model"]["offline"], true);
+    assert_eq!(value["model"]["auto_download"], true);
 }
 #[cfg(feature = "qwentts")]
 #[test]

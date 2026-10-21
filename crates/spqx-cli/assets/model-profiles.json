@@ -1,0 +1,89 @@
+[
+  {
+    "repo": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
+    "revision": "4e44ed4bcee28a0f89a493e07bde16e6dccd43eb",
+    "files": [
+      {
+        "path": "README.md",
+        "bytes": 1026,
+        "sha256": "879de26159692338331da655588f1b13eeb088db35a39905863f346fcf316892"
+      },
+      {
+        "path": "config.json",
+        "bytes": 5522,
+        "sha256": "ebd89bea756c7f75734a759ee2cb31ee06ae8bd22eca7694bac156280a34e58b"
+      },
+      {
+        "path": "generation_config.json",
+        "bytes": 245,
+        "sha256": "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa"
+      },
+      {
+        "path": "merges.txt",
+        "bytes": 1671839,
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+      },
+      {
+        "path": "model.safetensors",
+        "bytes": 1164476202,
+        "sha256": "e88c0b15e76e3848ca040121880a974f417317bb2a021ab9ce5c656770e26693"
+      },
+      {
+        "path": "model.safetensors.index.json",
+        "bytes": 77731,
+        "sha256": "7defea2f7ccfaaf74e22adaf3f1e44f4a37785d1dc5651ccb0f3122aebb6734f"
+      },
+      {
+        "path": "preprocessor_config.json",
+        "bytes": 127,
+        "sha256": "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119"
+      },
+      {
+        "path": "speech_tokenizer/config.json",
+        "bytes": 2336,
+        "sha256": "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167"
+      },
+      {
+        "path": "speech_tokenizer/configuration.json",
+        "bytes": 76,
+        "sha256": "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd"
+      },
+      {
+        "path": "speech_tokenizer/model.safetensors",
+        "bytes": 682293092,
+        "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"
+      },
+      {
+        "path": "speech_tokenizer/preprocessor_config.json",
+        "bytes": 234,
+        "sha256": "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb"
+      },
+      {
+        "path": "tokenizer_config.json",
+        "bytes": 7344,
+        "sha256": "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670"
+      },
+      {
+        "path": "vocab.json",
+        "bytes": 2776833,
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      }
+    ]
+  },
+  {
+    "repo": "Serveurperso/Qwen3-TTS-GGUF",
+    "revision": "b7ee2e8c7459c3bea99da23e3d178125a7d1713c",
+    "files": [
+      {
+        "path": "qwen-talker-0.6b-base-Q8_0.gguf",
+        "bytes": 992615488,
+        "sha256": "d54dbaf10591421fa764ed630d764efa717ae40cd959bd48c66d4eb1af226426"
+      },
+      {
+        "path": "qwen-tokenizer-12hz-F32.gguf",
+        "bytes": 647263104,
+        "sha256": "b16b95557c7c7340a121757bd6855b9609e1cf4ad3fad0778b89393293ae5f3d"
+      }
+    ]
+  }
+]
