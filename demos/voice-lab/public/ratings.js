@@ -39,7 +39,8 @@ function display(next){
  for(const t of state.traits)$(t.id).value=v.scores[t.id]??50;
  for(const category of state.categories)for(const input of document.querySelectorAll(`input[name="${category.id}"]`))input.checked=(v[category.id]===input.value);
  $('naturalness').value=v.naturalness;$('excluded').checked=v.excluded;$('pronunciation-issue').checked=v.pronunciation_issue;$('rating-notes').value=v.notes;
- updateOutputs();$('draft-state').textContent=drafts.has(c.id)?'Unsaved changes':c.rating?`Saved · revision${c.rating.revision}`:'Not saved';
+ updateOutputs();$('pending-note').hidden=!c.rating?.categories_pending||drafts.has(c.id);
+ $('draft-state').textContent=drafts.has(c.id)?'Unsaved changes':c.rating?c.rating.categories_pending?`Saved · revision${c.rating.revision} · categories pending`:`Saved · revision${c.rating.revision}`:'Not saved';
  const audio=$('rating-audio');audio.pause();audio.removeAttribute('src');if(c.media)audio.src=c.media;audio.load();
  $('audio-info').textContent=`${c.seconds.toFixed(2)}s · audition ${index+1} of ${state.candidates.length}`;$('rating-text').textContent=state.text;
  progress();setBusy(false);

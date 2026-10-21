@@ -56,7 +56,10 @@ are not exposed. Source prompts and requested categories must not become labels.
 
 - `candidates/cNNN/listening.m4a`: hash-bound listening copy.
 - `candidates/cNNN/audition/reference.wav`: exact raw rated take.
-- `ratings/cNNN.json`: versioned explicit annotation; absent means **unrated**.
+- `ratings/cNNN.json`: versioned explicit annotation; absent means **unrated**. Version 1
+  predates the two categories and stays readable: missing judgements load as `null`
+  with `categories_pending`, scores and naturalness are untouched, and the file is
+  rewritten only when a person explicitly completes it.
 - `ratings/cNNN.lock`: cross-process exclusive save lock, with pid/intent/time.
 
 `GET /api/ratings` returns blind state, trait and category definitions and saved
@@ -67,6 +70,11 @@ bank/audio hashes, expected revision, UUIDv4 operation id, six scores, both
 category choices (or `null`), quality, flags and notes. Send the exact app Origin and JSON content type, including from
 CLI clients. Existing exact Host/mandatory write-Origin and private-tailnet keyless
 policy apply. Reachability is not conversational/session-binding authority.
+
+Adding a trait or category is a contract change. Existing annotations are never
+rewritten, defaulted or rejected; a record that predates a field reads as `null`, and
+the rater asks for it explicitly. Do not change trait or category ids without a
+compatibility rule and a test that replays bytes written by the released rater.
 
 Saves verify raw/listening custody, reject unknown bodies and stale revisions,
 serialize through a file lock, and atomically replace the annotation. Retrying the
@@ -93,7 +101,8 @@ Do not ship a retro-console control surface until useful audible edits are shown
 
 ## Evidence
 
-`just test`, `just check`, `just ratings-browser-check` in `demos/voice-lab`.
+`just test`, `just check`, `just ratings-browser-check` in `demos/voice-lab`
+(32 tests/163 assertions).
 The browser check also compiles the plain-JS rater for the browser, because a
 TypeScript annotation there silently blanks the page.
 The browser check starts a fresh isolated loopback 8805 service with synthetic

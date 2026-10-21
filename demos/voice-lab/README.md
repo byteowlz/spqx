@@ -53,10 +53,10 @@ Set `rating_bank = "/private/voice-bank"` (or `--rating-bank`) and open `/rating
 
 ## Proof and visual status
 
-`just test` runs 29 tests/149 assertions including effective-vector custody, lossless native numeric documents, explicit canonical save/retry, media protections, single-flight and incompatible provider/admission failures. `just check` builds the Bun server.
+`just test` runs 32 tests/163 assertions including effective-vector custody, lossless native numeric documents, explicit canonical save/retry, media protections, single-flight and incompatible provider/admission failures. `just check` builds the Bun server.
 
 `VOICE_LAB_URL=http://127.0.0.1:8805 just frozen-browser-check` intentionally requires a fresh isolated native test service/registry. It performs one admitted real render, keyboard PCA edits, an in-flight change, browser decode/playback-clock checks, exact canonical save/retry/reopen, Range206 and Origin denial. Do not run it against user data. `scripts/capture.ts` captures only read-only synthetic visual fixtures.
 
-`just ratings-browser-check` starts its own isolated loopback8805 service with synthetic non-speech audio. It also compiles the plain-JS rater, then tests explicit rating saves/reload, required categories, hidden requested attributes, lost acknowledgements, stale tabs, keyboard edits, ranges and phone widths without inference or real labels.
+`just ratings-browser-check` starts its own isolated loopback8805 service with synthetic non-speech audio. It also compiles the plain-JS rater, then tests explicit rating saves/reload, required categories, hidden requested attributes, byte-for-byte survival and explicit completion of pre-category ratings, lost acknowledgements, stale tabs, keyboard edits, ranges and phone widths without inference or real labels.
 
 r4 extends the existing r3 look with manual ratings; no retro-console redesign. r3 preserves the existing r2 anatomy/tokens. Studio line `spqx-voice-lab` has no selected production target; these remain exploratory proposals and Web evidence. Native CUDA execution, synthetic screenshots, headless audio-clock advancement, physical-phone behavior and human listening are distinct evidence. Prototype controller/quota/shutdown hardening remains tracked separately; no blanket release/security approval.

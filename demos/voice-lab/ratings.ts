@@ -27,16 +27,46 @@ const cid=(v:unknown):v is string=>typeof v==='string'&&/^c\d{3}$/.test(v);
 const score=(v:unknown):v is number=>typeof v==='number'&&Number.isInteger(v)&&v>=0&&v<=100;
 const plain=(v:any)=>v!==null&&typeof v==='object'&&!Array.isArray(v);
 export type Candidate={id:string;seconds:number;audio_sha256:string;listening_sha256:string};
-export type RatingInput={bank:string;audio_sha256:string;operation_id:string;expected_revision:number;scores:Record<string,number>;naturalness:number;excluded:boolean;pronunciation_issue:boolean;notes:string}&Record<CategoryId,RatingChoice>;
-export type Rating=RatingInput&{version:1;candidate:string;revision:number;updated:string;source:'explicit-rating';fingerprint:string};
-export function validateRating(v:any):RatingInput {
-  const keys=[...categories.map(c=>c.id),'audio_sha256','bank','excluded','expected_revision','naturalness','notes','operation_id','pronunciation_issue','scores'].sort().join(',');
+export type RatingInput=RatingBody&Record<CategoryId,RatingChoice>;
+export type RatingBody={bank:string;audio_sha256:string;operation_id:string;expected_revision:number;scores:Record<string,number>;naturalness:number;excluded:boolean;pronunciation_issue:boolean;notes:string};
+export type Rating=RatingInput&{version:2;candidate:string;revision:number;updated:string;source:'explicit-rating';fingerprint:string};
+export type StoredRating=RatingBody&Record<CategoryId,RatingChoice>&{version:1|2;candidate:string;revision:number;updated:string;source:'explicit-rating';fingerprint:string;categories_pending?:boolean};
+const body=(v:any):RatingBody=>({bank:v.bank,audio_sha256:v.audio_sha256,operation_id:v.operation_id,expected_revision:v.expected_revision,scores:Object.fromEntries(traits.map(t=>[t.id,v.scores[t.id]])),naturalness:v.naturalness,excluded:v.excluded,pronunciation_issue:v.pronunciation_issue,notes:v.notes.normalize('NFC')});
+const isCategoryKey=(k:string)=>categories.some(c=>c.id===k);
+const withoutCategories=(v:any)=>Object.fromEntries(Object.entries(v).filter(([k])=>!isCategoryKey(k)));
+const checkBody=(raw:any)=>{
+  const v=withoutCategories(raw);
+  const keys='audio_sha256,bank,excluded,expected_revision,naturalness,notes,operation_id,pronunciation_issue,scores';
   if(!plain(v)||Object.keys(v).sort().join(',')!==keys||typeof v.bank!=='string'||v.bank.length>128||!sha(v.audio_sha256)||typeof v.operation_id!=='string'||!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v.operation_id)||!Number.isSafeInteger(v.expected_revision)||v.expected_revision<0||!score(v.naturalness)||typeof v.excluded!=='boolean'||typeof v.pronunciation_issue!=='boolean'||typeof v.notes!=='string'||v.notes.length>600||/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(v.notes))
-    throw new RatingError('invalid_rating','Send all six scores, both categories, naturalness, flags, notes and the displayed audio revision.');
+    throw new RatingError('invalid_rating','Send all six scores, naturalness, flags, notes and the displayed audio revision.');
   if(!plain(v.scores)||Object.keys(v.scores).sort().join(',')!==traits.map(t=>t.id).sort().join(',')||traits.some(t=>!score(v.scores[t.id])))throw new RatingError('invalid_scores','Each trait is an integer from0 to100.');
+};
+export function validateRating(v:any):RatingInput {
+  checkBody(v);
+  if(categories.some(c=>!Object.prototype.hasOwnProperty.call(v,c.id)))throw new RatingError('invalid_rating','Send all six scores, both categories, naturalness, flags, notes and the displayed audio revision.');
   const chosen=Object.fromEntries(categories.map(c=>[c.id,v[c.id]===null?null:(c.options.some(o=>o.id===v[c.id])?v[c.id]:undefined)]));
   if(categories.some(c=>chosen[c.id]!==null&&chosen[c.id]===undefined))throw new RatingError('invalid_categories','Choose one listed option per category, or null for unrated.');
-  return {...chosen,bank:v.bank,audio_sha256:v.audio_sha256,operation_id:v.operation_id,expected_revision:v.expected_revision,scores:Object.fromEntries(traits.map(t=>[t.id,v.scores[t.id]])),naturalness:v.naturalness,excluded:v.excluded,pronunciation_issue:v.pronunciation_issue,notes:v.notes.normalize('NFC')};
+  return {...chosen,...body(v)};
+}
+// Ratings saved before categories existed stay valid and byte-identical: the omitted
+// judgements read as null, never as a fabricated midpoint, and the record is only
+// rewritten when a person explicitly completes it.
+export function validateStored(v:any):StoredRating {
+  if(!plain(v)||v.source!=='explicit-rating'||typeof v.candidate!=='string'||!Number.isSafeInteger(v.revision)||v.revision<1||typeof v.updated!=='string'||!Number.isFinite(Date.parse(v.updated)))throw new Error('format');
+  const rest=Object.fromEntries(Object.entries(v).filter(([k])=>!['version','candidate','revision','updated','source','fingerprint'].includes(k)));
+  if(v.version===1){
+    if(categories.some(c=>Object.prototype.hasOwnProperty.call(v,c.id)))throw new Error('format');
+    const legacy=withoutCategories(rest);
+    checkBody(legacy);
+    if(typeof v.fingerprint!=='string'||v.fingerprint!==hash(JSON.stringify(body(legacy))))throw new Error('format');
+    return {...Object.fromEntries(categories.map(c=>[c.id,null])),...body(legacy),version:1,candidate:v.candidate,revision:v.revision,updated:v.updated,source:'explicit-rating',fingerprint:v.fingerprint,categories_pending:true};
+  }
+  if(v.version===2){
+    const input=validateRating(rest);
+    if(v.fingerprint!==hash(JSON.stringify(input)))throw new Error('format');
+    return {...input,version:2,candidate:v.candidate,revision:v.revision,updated:v.updated,source:'explicit-rating',fingerprint:v.fingerprint};
+  }
+  throw new Error('format');
 }
 
 /** Private file-backed annotations. No synthesis, trait inference or registry operations. */
@@ -59,13 +89,13 @@ export class RatingBank {
     if(new Set(ready.map(c=>c.id)).size!==ready.length)throw new RatingError('bank_invalid','Duplicate audition ids.',503);
     return {id:v.id,text:v.text,target_count:v.target_count,status:String(v.status),ready};
   }
-  private async current(id:string):Promise<Rating|null>{
+  private async current(id:string):Promise<StoredRating|null>{
     try{
       const bytes=await readFile(await this.confined('ratings',id+'.json'),'utf8');
       if(bytes.length>5000)throw new Error('oversize');
-      const v=JSON.parse(bytes),input=validateRating(Object.fromEntries(Object.entries(v).filter(([k])=>!['version','candidate','revision','updated','source','fingerprint'].includes(k))));
-      if(v.version!==1||v.candidate!==id||!Number.isSafeInteger(v.revision)||v.revision!==v.expected_revision+1||v.source!=='explicit-rating'||v.fingerprint!==hash(JSON.stringify(input))||typeof v.updated!=='string'||!Number.isFinite(Date.parse(v.updated)))throw new Error('format');
-      return v;
+      const v=JSON.parse(bytes),rating=validateStored(v);
+      if(rating.candidate!==id||rating.revision!==rating.expected_revision+1)throw new Error('format');
+      return rating;
     }catch(error:any){if(error.code==='ENOENT')return null;if(error instanceof RatingError&&error.code==='rating_path_denied')throw error;throw new RatingError('rating_corrupt','A saved rating needs operator inspection. It was not replaced.',503);}
   }
   async state(){
@@ -75,7 +105,7 @@ export class RatingBank {
       if(rating&&(rating.bank!==bank.id||rating.audio_sha256!==c.audio_sha256))throw new RatingError('rating_stale','A saved rating belongs to different audio. Ask the operator.',409);
       return {...c,media:'/media/rating-'+c.id,rating};
     }));
-    return {version:1,bank:bank.id,text:bank.text,target_count:bank.target_count,generation_status:bank.status,traits,categories,quality:{label:'Naturalness',low:'Broken / unusable',high:'Natural / effortless'},candidates,rated:candidates.filter(c=>c.rating).length};
+    return {version:1,bank:bank.id,text:bank.text,target_count:bank.target_count,generation_status:bank.status,traits,categories,quality:{label:'Naturalness',low:'Broken / unusable',high:'Natural / effortless'},candidates,rated:candidates.filter(c=>c.rating).length,awaiting_categories:candidates.filter(c=>c.rating?.categories_pending).length};
   }
   async audio(id:string){
     if(!cid(id))throw new RatingError('not_found','No such audition.',404);
@@ -102,7 +132,7 @@ export class RatingBank {
       const current=await this.current(id),fingerprint=hash(JSON.stringify(value));
       if(current?.operation_id===value.operation_id){if(current.fingerprint!==fingerprint)throw new RatingError('operation_conflict','This save intent was already used for different scores.',409);return current;}
       if((current?.revision||0)!==value.expected_revision)throw new RatingError('revision_conflict','This rating changed in another tab. Reload before saving.',409);
-      const rating:Rating={...value,version:1,candidate:id,revision:value.expected_revision+1,updated:new Date().toISOString(),source:'explicit-rating',fingerprint};
+      const rating:Rating={...value,version:2,candidate:id,revision:value.expected_revision+1,updated:new Date().toISOString(),source:'explicit-rating',fingerprint};
       temporary=join(directory,id+'.'+randomUUID()+'.tmp');
       await writeFile(temporary,JSON.stringify(rating,null,2)+'\n',{flag:'wx',mode:0o600});await rename(temporary,join(directory,id+'.json'));temporary=undefined;
       return rating;

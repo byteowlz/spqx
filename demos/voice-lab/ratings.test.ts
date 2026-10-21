@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } fro
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { categories, RatingBank, traits, validateRating } from './ratings';
-import { ratingFixture } from './ratings-fixture';
+import { ratingFixture, writeLegacyRating } from './ratings-fixture';
 import { createApp } from './core';
 const roots:string[]=[];
 afterAll(async()=>{await Promise.all(roots.map(root=>rm(root,{recursive:true,force:true})));});
@@ -25,6 +25,26 @@ test('rating bodies have exact six finite integer traits and separate quality',a
 });
 test('categories are explicit judgements and allow an honest unclear answer',async()=>{const {root,bank,value}=await setup();for(const bad of [{...value,gender:undefined},{...value,gender:'androgyny'}])await expect(bank.save('c001',bad)).rejects.toThrow();const unclear=await bank.save('c001',{...value,gender:'unclear',age_band:'unclear'});expect(unclear.gender).toBe('unclear');const unjudged=await new RatingBank(root).save('c002',{...value,audio_sha256:(await bank.state()).candidates[1].audio_sha256,operation_id:randomUUID(),gender:null,age_band:null});expect([unjudged.gender,unjudged.age_band]).toEqual([null,null]);expect((await new RatingBank(root).state()).candidates[1].rating).toEqual(unjudged);});
 test('a bank that redefines categories is refused rather than silently relabelled',async()=>{const root=await mkdtemp(join(tmpdir(),'spqx-rating-mismatch-'));roots.push(root);await ratingFixture(root,undefined,{categories:[{id:'gender',label:'Gender',options:[{id:'male',label:'Male'}]}]});await expect(new RatingBank(root).state()).rejects.toMatchObject({code:'bank_invalid'});});
+test('pre-category human ratings stay valid byte-for-byte and are never invented',async()=>{
+ const {root,bank}=await setup();const c0=(await bank.state()).candidates[0];const {rating,bytes}=await writeLegacyRating(root,'c001',c0.audio_sha256);
+ const state=await new RatingBank(root).state();const loaded=state.candidates[0].rating!;
+ expect(loaded.scores).toEqual(rating.scores);expect(loaded.naturalness).toBe(70);expect(loaded.notes).toBe('legacy synthetic rating');
+ expect([loaded.gender,loaded.age_band]).toEqual([null,null]);expect(loaded.categories_pending).toBe(true);expect(loaded.version).toBe(1);
+ expect(state.rated).toBe(1);expect(state.awaiting_categories).toBe(1);
+ expect(await readFile(join(root,'ratings/c001.json'))).toEqual(bytes);
+});
+test('completing a legacy rating requires the current revision and upgrades it explicitly',async()=>{
+ const {root,bank,value}=await setup();const c0=(await bank.state()).candidates[0];await writeLegacyRating(root,'c001',c0.audio_sha256);
+ await expect(bank.save('c001',{...value,operation_id:randomUUID(),expected_revision:0})).rejects.toMatchObject({code:'revision_conflict'});
+ const completed=await bank.save('c001',{...value,operation_id:randomUUID(),expected_revision:1,gender:'androgynous',age_band:'older'});
+ expect([completed.version,completed.revision,completed.gender,completed.age_band]).toEqual([2,2,'androgynous','older']);expect(completed.categories_pending).toBeUndefined();
+ expect(JSON.parse(await readFile(join(root,'ratings/c001.json'),'utf8')).version).toBe(2);
+});
+test('tampered legacy fingerprints still fail closed instead of loading or clearing scores',async()=>{
+ const {root,bank}=await setup();const c0=(await bank.state()).candidates[0];const {rating}=await writeLegacyRating(root,'c001',c0.audio_sha256);
+ const tampered={...rating,scores:{...rating.scores,pitch:1}};await writeFile(join(root,'ratings/c001.json'),JSON.stringify(tampered,null,2));
+ await expect(new RatingBank(root).state()).rejects.toMatchObject({code:'rating_corrupt'});
+});
 test('exact audition-bound save persists across reload; ack-lost retry is idempotent',async()=>{
  const {root,bank,value}=await setup();const first=await bank.save('c001',value);expect(first.revision).toBe(1);expect(first.source).toBe('explicit-rating');expect(await new RatingBank(root).save('c001',Object.fromEntries(Object.entries(value).reverse()))).toEqual(first);
  expect((await bank.state()).rated).toBe(1);expect((await bank.state()).candidates[0].rating?.scores).toEqual(value.scores);expect((await readdir(join(root,'ratings')))).toEqual(['c001.json']);

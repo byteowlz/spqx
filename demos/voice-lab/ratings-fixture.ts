@@ -1,6 +1,15 @@
-import { createHash } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+// Reproduces the pre-category save exactly, so compatibility is tested against bytes
+// the shipped rater really wrote rather than an invented shape.
+export async function writeLegacyRating(root:string,id:string,audio_sha256:string,revision=1){
+  const digest=(v:Uint8Array|string)=>createHash('sha256').update(v).digest('hex');
+  const value={bank:'synthetic-test-bank',audio_sha256,operation_id:randomUUID(),expected_revision:revision-1,scores:Object.fromEntries(['pitch','brightness','breathiness','roughness','weight','nasality'].map(t=>[t,50])),naturalness:70,excluded:false,pronunciation_issue:false,notes:'legacy synthetic rating'};
+  const rating={...value,version:1,candidate:id,revision,updated:new Date().toISOString(),source:'explicit-rating' as const,fingerprint:digest(JSON.stringify(value))};
+  await mkdir(join(root,'ratings'),{recursive:true});await writeFile(join(root,'ratings',id+'.json'),JSON.stringify(rating,null,2)+'\n',{mode:0o600});
+  return {rating,bytes:await readFile(join(root,'ratings',id+'.json'))};
+}
 export async function ratingFixture(root:string,listening=Buffer.from('synthetic listening bytes'),extra:Record<string,unknown>={}){
   const digest=(v:Uint8Array)=>createHash('sha256').update(v).digest('hex');
   const raw=Buffer.from('synthetic raw audition; not speech');
