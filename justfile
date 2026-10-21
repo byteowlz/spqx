@@ -14,6 +14,10 @@ test-portable:
 test-native-design:
     cargo test --locked -p spqx-core --no-default-features --features qwentts --test voice_design -- --ignored --nocapture
 
+# Explicit lawful ICL inputs, fresh output and external accepted admission; see docs/frozen-icl.md.
+test-native-icl:
+    cargo test --locked -p spqx-cli --no-default-features --features qwentts --test frozen_icl -- --ignored --nocapture
+
 test-native-cpu:
     cargo test --locked -p spqx-core --no-default-features --features qwentts --test native_cpu -- --ignored --nocapture
 

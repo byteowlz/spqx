@@ -53,7 +53,7 @@ A private draft directory contains:
 
 `spqx lab inspect draft` validates custody and the PCA recipe/vector relationship. `spqx lab schema` prints the JSON Schema. The canonical registry points to a verified copy of these assets under its identity/synthesis directory. Keep numeric document bytes intact; JSON implementations that alter float serialization or minus-zero can invalidate bank identities.
 
-The engine supports raw frozen vectors without a WAV at runtime, but this product keeps the WAV for listening, provenance and explicitly approved migrations. A complete ICL prompt would additionally need codec codes and matching text; frozen v1 deliberately uses x-vector-only semantics. Different checkpoints/quantized artifacts/backends are separate scopes even if dimensions happen to match.
+The engine supports raw frozen vectors without a WAV at runtime, but this product keeps the WAV for listening, provenance and explicitly approved migrations. A complete ICL prompt additionally needs codec codes and matching original text; frozen v1 deliberately uses x-vector-only semantics. The distinct [full-ICL prototype](frozen-icl.md) adds explicit extraction/replay and saved audition bundle v2 without changing v1 or the live Lab. Different checkpoints/quantized artifacts/backends are separate scopes even if dimensions happen to match.
 
 ## Voice Lab
 

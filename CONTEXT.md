@@ -23,6 +23,12 @@ _Avoid_: Conversation session, durable session, cross-engine voice embedding, au
 **Frozen conditioning**:
 The complete, selected synthesis conditioning in one specific engine/model/encoder space. It is not a recognition embedding or a cross-model identity.
 
+**ICL reference context**:
+The reference speech codes and their matching original text that condition an utterance beyond its speaker vector. It is distinct from the new audition's audio and spoken text.
+
+**Frozen ICL conditioning**:
+A complete scoped speaker vector plus its explicitly retained ICL reference context. Editing the speaker vector does not implicitly edit or discard that context.
+
 **Saved audition**:
 A completed performance kept with its matching text, frozen conditioning and provenance. Reopening it must not regenerate or reinterpret the selected take.
 

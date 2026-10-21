@@ -215,6 +215,28 @@ impl Session {
             PreparedInput::Frozen { frozen, seed },
         )
     }
+    /// Load the exact speaker vector, original reference codes and text; never reads a source WAV.
+    pub fn load_frozen_icl(
+        model: &Path,
+        prompt: &crate::icl::FrozenIcl,
+        language: &str,
+        seed: Option<u64>,
+        options: &EngineOptions,
+    ) -> Result<Self> {
+        prompt.validate()?;
+        if language.trim().is_empty() || language.len() > 64 || language.contains('\0') {
+            bail!("invalid frozen ICL target language");
+        }
+        Self::load_conditioned(
+            model,
+            language,
+            options,
+            PreparedInput::Icl {
+                prompt,
+                seed: checked_seed(seed)?,
+            },
+        )
+    }
     fn load_conditioned(
         model: &Path,
         language: &str,
@@ -237,6 +259,9 @@ impl Session {
                 PreparedInput::Frozen { frozen, seed } => {
                     crate::ggml::Session::load_frozen(model, frozen, language, seed, options)?
                 }
+                PreparedInput::Icl { prompt, seed } => {
+                    crate::ggml::Session::load_frozen_icl(model, prompt, language, seed, options)?
+                }
             }),
             _ => bail!(
                 "{} is not implemented for {kind:?}; no fallback",
@@ -252,6 +277,15 @@ impl Session {
             Inner::Ggml(engine) => engine.frozen_conditioning(),
             #[cfg(any(spqx_mlx, feature = "tch-backend"))]
             _ => bail!("raw conditioning export is not implemented for this engine; no fallback"),
+        }
+    }
+    /// Explicit complete ICL export; unsupported engines/modes never return a vector-only substitute.
+    pub fn frozen_icl(&self) -> Result<crate::icl::FrozenIcl> {
+        match &self.inner {
+            #[cfg(feature = "qwentts")]
+            Inner::Ggml(engine) => engine.frozen_icl(),
+            #[cfg(any(spqx_mlx, feature = "tch-backend"))]
+            _ => bail!("full ICL export is not implemented for this engine; no fallback"),
         }
     }
     /// Selected engine name (not a claim that an automatic device was observed).
@@ -316,6 +350,10 @@ impl Session {
 }
 
 enum PreparedInput<'a> {
+    Icl {
+        prompt: &'a crate::icl::FrozenIcl,
+        seed: i64,
+    },
     Description {
         description: &'a str,
         seed: i64,
@@ -338,7 +376,7 @@ fn checked_seed(seed: Option<u64>) -> Result<i64> {
     Ok(seed
         .map(i64::try_from)
         .transpose()
-        .context("VoiceDesign seed exceeds i64 range")?
+        .context("seed exceeds native i64 range")?
         .unwrap_or(-1))
 }
 

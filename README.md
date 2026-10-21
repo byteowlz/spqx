@@ -148,7 +148,7 @@ cargo test --release --no-default-features --features mlx \
 
 ## Frozen voices and PCA
 
-`spqx lab` extracts model-scoped vectors, fits genuine PCA, explicitly previews edits and saves the exact vector plus audition WAV/text. Explicit canonical saving uses voqx; `say --voice-id` reuses frozen conditioning without re-encoding the WAV. Native GGML/CUDA is qualified; MLX frozen-input/VoiceDesign inference remains separate work. See [workflow and compatibility](docs/frozen-voices.md) and the [experimental slider/A-B Lab](demos/voice-lab/README.md).
+`spqx lab` extracts model-scoped vectors, fits genuine PCA, explicitly previews edits and saves the exact vector plus audition WAV/text. Explicit canonical saving uses voqx; `say --voice-id` reuses frozen conditioning without re-encoding the WAV. Native GGML/CUDA is qualified; MLX frozen-input/VoiceDesign inference remains separate work. See [workflow and compatibility](docs/frozen-voices.md), the explicit [full-ICL freeze/replay prototype](docs/frozen-icl.md), and the [experimental slider/A-B Lab](demos/voice-lab/README.md).
 
 ## Voice references
 

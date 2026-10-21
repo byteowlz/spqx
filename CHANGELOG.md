@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add explicit native full-ICL freezing: speaker vector plus checksummed original reference codes/text, distinct from unchanged vector-only v1. `lab extract --full-icl` and `lab preview --icl` retain context without a source-WAV runtime dependency; optional same-scope speaker/PCA overrides leave context intact. Bundle v2/canonical consumption fail closed for incompatible or legacy readers. Exact native original/frozen/fresh-CLI replay and interruption/recovery tests passed for one greedy fixture; human accent/PCA qualification and live Lab integration remain separate. See `docs/frozen-icl.md` and ADR 0003.
+
 - Add engine/artifact-scoped frozen TTS conditioning and genuine centered-SVD PCA fitting with residual-preserving offsets. Keep exact audition WAV/text, effective vectors and reopenable PCA banks; fail on incompatible scope instead of normalizing, re-encoding or substituting engines. Add `spqx lab` extraction/fitting/preview/inspection/schema/explicit canonical-save operations and `say --voice-id` consumption through the existing voqx registry. Canonical saves are synthesis-only and retry-idempotent; existing named voices remain supported.
 - Extend the experimental Voice Lab's existing sliders/A-B flow with standalone effective-vector capture, lossless native numeric archives, explicit native GGML provider and reusable-voice Save. Preserve the user-directed keyless Host/Origin/resource/quota guards and old draft audio. Native previews are bounded cold native processes, not a second warm SDK service; MLX frozen-input/VoiceDesign runtime and persistent warm editing remain separate work. Existing exploratory styling is retained; no production visual selection is implied. See `docs/frozen-voices.md` and ADR 0002.
 

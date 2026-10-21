@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 use spqx_core::{
     audio::write_wav_float_bytes,
     conditioning::{hash_bytes, FrozenConditioning, PcaSpace},
+    icl::{FrozenIcl, IclContext},
     synthesis::{Sampling, Session, Stop},
 };
 use std::{
@@ -33,6 +34,9 @@ enum LabCommand {
         ref_text_file: PathBuf,
         #[arg(long, default_value = "german")]
         language: String,
+        /// Export both speaker vector and original ICL codes/text, not vector-only data.
+        #[arg(long)]
+        full_icl: bool,
         #[arg(long)]
         out: PathBuf,
     },
@@ -49,24 +53,7 @@ enum LabCommand {
         out: PathBuf,
     },
     /// Render an explicit candidate and freeze exactly its vector, WAV, text and bank.
-    Preview {
-        text: String,
-        #[arg(long, conflicts_with = "space", required_unless_present = "space")]
-        conditioning: Option<PathBuf>,
-        #[arg(long, conflicts_with = "conditioning")]
-        space: Option<PathBuf>,
-        #[arg(long, requires = "space")]
-        base: Option<String>,
-        /// Comma-separated sigma offsets; no inference occurs until Preview is called.
-        #[arg(long, requires = "space", allow_hyphen_values = true)]
-        offsets: Option<String>,
-        #[arg(long, default_value = "german")]
-        language: String,
-        #[arg(long)]
-        seed: Option<u64>,
-        #[arg(long)]
-        out: PathBuf,
-    },
+    Preview(PreviewArgs),
     /// Explicitly promote a completed audition to the shared synthesis-only registry.
     Save {
         #[arg(long)]
@@ -93,6 +80,123 @@ enum LabCommand {
     },
 }
 
+#[derive(Debug, Args)]
+struct PreviewArgs {
+    text: String,
+    #[arg(long,conflicts_with="space",required_unless_present_any=["space","icl"])]
+    conditioning: Option<PathBuf>,
+    #[arg(long, conflicts_with = "conditioning")]
+    space: Option<PathBuf>,
+    #[arg(long, requires = "space")]
+    base: Option<String>,
+    #[arg(long, requires = "space", allow_hyphen_values = true)]
+    offsets: Option<String>,
+    /// Complete frozen ICL prompt; optionally replace its speaker using --conditioning or --space.
+    #[arg(long)]
+    icl: Option<PathBuf>,
+    #[arg(long, default_value = "german")]
+    language: String,
+    #[arg(long)]
+    seed: Option<u64>,
+    #[arg(long)]
+    out: PathBuf,
+}
+struct PreparedVoice {
+    speaker: FrozenConditioning,
+    pca: Option<PcaSpace>,
+    context: Option<IclContext>,
+}
+impl PreviewArgs {
+    fn prepare(&self) -> Result<PreparedVoice> {
+        let prompt: Option<FrozenIcl> = self.icl.as_deref().map(read_json).transpose()?;
+        if let Some(prompt) = &prompt {
+            prompt.validate()?;
+        }
+        let pca: Option<PcaSpace> = self.space.as_deref().map(read_json).transpose()?;
+        let speaker = if let Some(pca) = &pca {
+            let offsets = self
+                .offsets
+                .as_deref()
+                .context("PCA Preview requires --offsets")?
+                .split(',')
+                .map(str::parse)
+                .collect::<std::result::Result<Vec<f64>, _>>()?;
+            pca.edit(
+                self.base
+                    .as_deref()
+                    .context("PCA Preview requires --base")?,
+                &offsets,
+            )?
+        } else if let Some(path) = &self.conditioning {
+            read_json(path)?
+        } else {
+            prompt
+                .as_ref()
+                .context("missing conditioning or ICL prompt")?
+                .speaker
+                .clone()
+        };
+        speaker.validate()?;
+        let context = prompt
+            .map(|p| p.with_speaker(speaker.clone()).map(|p| p.context))
+            .transpose()?;
+        Ok(PreparedVoice {
+            speaker,
+            pca,
+            context,
+        })
+    }
+    fn run(self, common: &CommonOpts) -> Result<()> {
+        ensure!(
+            !self.out.exists(),
+            "draft already exists; it will not be overwritten"
+        );
+        ensure!(!self.text.trim().is_empty(), "empty synthesis text");
+        let prepared = self.prepare()?;
+        let config = common.load_config()?;
+        let language = spqx_core::worker::normalize_language(&self.language);
+        let start = Instant::now();
+        let guard = spqx_core::stdio::StdoutGuard::new()?;
+        let session = engine::load_frozen_session(
+            &config,
+            &prepared.speaker,
+            prepared.context.as_ref(),
+            &language,
+            self.seed,
+        )?;
+        let prepare_s = start.elapsed().as_secs_f64();
+        let (wave, first_pcm_s, generation_s) = render(&session, &self.text, &config)?;
+        drop(guard);
+        let voice = VoiceBundle {
+            version: if prepared.context.is_some() { 2 } else { 1 },
+            conditioning: prepared.speaker,
+            icl_context: prepared.context,
+            pca: prepared.pca,
+            text: self.text,
+            language,
+            seed: self.seed,
+            reference_sha256: hash_bytes(&wave),
+            provenance: [
+                (
+                    "creator".into(),
+                    "spqx native voice instrument; no training or enrollment".into(),
+                ),
+                (
+                    "temperature".into(),
+                    config.sampling.temperature.to_string(),
+                ),
+                ("top_k".into(), config.sampling.top_k.to_string()),
+            ]
+            .into(),
+        };
+        voice.save(&self.out, &wave)?;
+        println!(
+            "{}",
+            serde_json::json!({"draft":self.out,"scope":voice.conditioning.scope,"recipe":voice.conditioning.recipe,"reference_sha256":voice.reference_sha256,"conditioning_mode":if voice.version==2{"full_icl"}else{"vector_only"},"prepare_s":prepare_s,"first_pcm_s_after_prepare":first_pcm_s,"generation_s":generation_s,"total_s":start.elapsed().as_secs_f64(),"canonical_voice_id":null,"registry_promoted":false})
+        );
+        Ok(())
+    }
+}
 pub fn run(args: LabArgs, common: &CommonOpts) -> Result<()> {
     match args.command {
         LabCommand::Schema => println!(
@@ -103,6 +207,7 @@ pub fn run(args: LabArgs, common: &CommonOpts) -> Result<()> {
             ref_audio,
             ref_text_file,
             language,
+            full_icl,
             out,
         } => {
             let config = common.load_config()?;
@@ -116,12 +221,19 @@ pub fn run(args: LabArgs, common: &CommonOpts) -> Result<()> {
                 &spqx_core::worker::normalize_language(&language),
                 &config.engine,
             )?;
-            let vector = session.frozen_conditioning()?;
-            write_json(&out, &vector)?;
+            let scope = if full_icl {
+                let prompt = session.frozen_icl()?;
+                write_json(&out, &prompt)?;
+                prompt.speaker.scope
+            } else {
+                let vector = session.frozen_conditioning()?;
+                write_json(&out, &vector)?;
+                vector.scope
+            };
             drop(_guard);
             println!(
                 "{}",
-                serde_json::json!({"conditioning":out,"scope":vector.scope,"recognition_enrolled":false})
+                serde_json::json!({"conditioning":out,"scope":scope,"mode":if full_icl{"full_icl"}else{"vector_only"},"recognition_enrolled":false})
             );
         }
         LabCommand::Fit {
@@ -157,68 +269,7 @@ pub fn run(args: LabArgs, common: &CommonOpts) -> Result<()> {
             write_json(&out, &space)?;
             print_space(&space)?;
         }
-        LabCommand::Preview {
-            text,
-            conditioning,
-            space,
-            base,
-            offsets,
-            language,
-            seed,
-            out,
-        } => {
-            ensure!(
-                !out.exists(),
-                "draft already exists; it will not be overwritten"
-            );
-            let pca: Option<PcaSpace> = space.as_deref().map(read_json).transpose()?;
-            let frozen = if let Some(pca) = &pca {
-                let base = base.as_deref().context("PCA Preview requires --base")?;
-                let offsets: Vec<f64> = offsets
-                    .context("PCA Preview requires --offsets")?
-                    .split(',')
-                    .map(str::parse)
-                    .collect::<std::result::Result<_, _>>()?;
-                pca.edit(base, &offsets)?
-            } else {
-                read_json(conditioning.as_deref().context("missing conditioning")?)?
-            };
-            let config = common.load_config()?;
-            let model = engine::resolve_model_dir(&config)?;
-            let language = spqx_core::worker::normalize_language(&language);
-            let start = Instant::now();
-            let _guard = spqx_core::stdio::StdoutGuard::new()?;
-            let session = Session::load_frozen(&model, &frozen, &language, seed, &config.engine)?;
-            let prepare_s = start.elapsed().as_secs_f64();
-            let (wave, first_pcm_s, generation_s) = render(&session, &text, &config)?;
-            drop(_guard);
-            let voice = VoiceBundle {
-                version: 1,
-                conditioning: frozen,
-                pca,
-                text,
-                language,
-                seed,
-                reference_sha256: hash_bytes(&wave),
-                provenance: [
-                    (
-                        "creator".into(),
-                        "spqx native voice instrument; no training or enrollment".into(),
-                    ),
-                    (
-                        "temperature".into(),
-                        config.sampling.temperature.to_string(),
-                    ),
-                    ("top_k".into(), config.sampling.top_k.to_string()),
-                ]
-                .into(),
-            };
-            voice.save(&out, &wave)?;
-            println!(
-                "{}",
-                serde_json::json!({"draft":out,"scope":voice.conditioning.scope,"recipe":voice.conditioning.recipe,"reference_sha256":voice.reference_sha256,"prepare_s":prepare_s,"first_pcm_s_after_prepare":first_pcm_s,"generation_s":generation_s,"total_s":start.elapsed().as_secs_f64(),"canonical_voice_id":null,"registry_promoted":false})
-            );
-        }
+        LabCommand::Preview(preview) => preview.run(common)?,
         LabCommand::Save {
             draft,
             name,

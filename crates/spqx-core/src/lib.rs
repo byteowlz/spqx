@@ -44,6 +44,7 @@ pub mod config;
 pub mod error;
 #[cfg(feature = "qwentts")]
 mod ggml;
+pub mod icl;
 pub mod postprocess;
 pub mod stdio;
 pub mod synthesis;

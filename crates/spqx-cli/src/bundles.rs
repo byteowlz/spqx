@@ -13,7 +13,11 @@ use voqx_core::{RegistryStore, SourceRecording, SynthesisProfile, SynthesisRefer
 
 pub const ENGINE: &str = "spqx-qwen3";
 pub const TAG: &str = "spqx:conditioning-v1";
+pub const ICL_TAG: &str = "spqx:conditioning-v2";
 
+#[cfg(test)]
+#[path = "bundles_icl_tests.rs"]
+mod icl_tests;
 #[cfg(test)]
 #[path = "bundles_tests.rs"]
 mod tests;
@@ -23,6 +27,8 @@ mod tests;
 pub struct VoiceBundle {
     pub version: u32,
     pub conditioning: FrozenConditioning,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icl_context: Option<spqx_core::icl::IclContext>,
     pub pca: Option<PcaSpace>,
     pub text: String,
     pub language: String,
@@ -32,8 +38,18 @@ pub struct VoiceBundle {
 }
 impl VoiceBundle {
     pub fn validate(&self, wave: &[u8]) -> Result<f64> {
-        ensure!(self.version == 1, "unsupported voice bundle version");
+        ensure!(
+            matches!(
+                (self.version, self.icl_context.is_some()),
+                (1, false) | (2, true)
+            ),
+            "unsupported/mismatched voice bundle conditioning mode"
+        );
         self.conditioning.validate()?;
+        if let Some(context) = &self.icl_context {
+            context.validate()?;
+            self.conditioning.require_scope(&context.scope)?;
+        }
         ensure!(
             !self.text.trim().is_empty() && self.text.len() <= 16384 && !self.text.contains('\0'),
             "invalid audition transcript"
@@ -253,7 +269,7 @@ pub fn promote_once(
             bundle.save(&destination,&wave)?;
             let audio=relative.join("reference.wav").to_string_lossy().replace('\\',"/");
             let transcript=relative.join("reference.txt").to_string_lossy().replace('\\',"/");
-            profile.references.push(SynthesisReference { id:reference_id.clone(), audio:audio.clone(), transcript:transcript.clone(), reference_language:Some(bundle.language.clone()), default:profile.references.is_empty(), tags:std::iter::once(TAG.to_owned()).chain(operation_tag.clone()).collect(), description:"Explicitly selected frozen spqx audition; engine-scoped vector and PCA recipe beside reference".into(), duration_seconds:seconds, sample_rate:24000 });
+            profile.references.push(SynthesisReference { id:reference_id.clone(), audio:audio.clone(), transcript:transcript.clone(), reference_language:Some(bundle.language.clone()), default:profile.references.is_empty(), tags:std::iter::once(TAG.to_owned()).chain((bundle.version==2).then(||ICL_TAG.to_owned())).chain(operation_tag.clone()).collect(), description:"Explicitly selected frozen spqx audition; engine-scoped vector and PCA recipe beside reference".into(), duration_seconds:seconds, sample_rate:24000 });
             identity.sources.push(SourceRecording {id:reference_id.clone(),audio,transcript:Some(transcript),language:Some(bundle.language.clone()),note:"Saved audition archive; no recognition enrollment or training".into(),created_at_unix:std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs()});
             identity.touch();
             Ok(id)
@@ -310,18 +326,23 @@ pub fn resolve(
     let wav = asset_path(&store.paths().root, &reference.audio)?;
     let transcript = asset_path(&store.paths().root, &reference.transcript)?;
     let text = fs::read_to_string(transcript)?;
-    let (frozen, seed) = if reference.tags.iter().any(|tag| tag == TAG) {
+    let (frozen, seed, icl_context) = if reference
+        .tags
+        .iter()
+        .any(|tag| tag == TAG || tag == ICL_TAG)
+    {
         let (bundle, _) = VoiceBundle::load(wav.parent().context("reference has no parent")?)?;
         ensure!(text == bundle.text, "canonical transcript changed");
-        (Some(bundle.conditioning), bundle.seed)
+        (Some(bundle.conditioning), bundle.seed, bundle.icl_context)
     } else {
-        (None, None)
+        (None, None, None)
     };
     Ok(crate::engine::Reference {
         wav,
         text,
         label: voice_id.into(),
         frozen,
+        icl_context,
         seed,
     })
 }

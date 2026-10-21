@@ -4,7 +4,7 @@ use spqx_core::{
     conditioning::{ConditioningBackend, ConditioningScope, PcaSpace},
 };
 
-fn fixture() -> (VoiceBundle, Vec<u8>) {
+pub(super) fn fixture() -> (VoiceBundle, Vec<u8>) {
     let scope = ConditioningScope {
         backend: ConditioningBackend::Ggml,
         model_sha256: "a".repeat(64),
@@ -32,6 +32,7 @@ fn fixture() -> (VoiceBundle, Vec<u8>) {
         VoiceBundle {
             version: 1,
             conditioning,
+            icl_context: None,
             pca: Some(pca),
             text: "Synthetic fixture only.".into(),
             language: "german".into(),

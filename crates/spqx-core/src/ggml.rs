@@ -1,5 +1,6 @@
 //! Pinned whole-pipeline libqwen binding. No tensor-level bridge or Python runtime.
 use crate::conditioning::{hash_file, ConditioningBackend, ConditioningScope, FrozenConditioning};
+use crate::icl::{FrozenIcl, IclContext, CODEBOOKS, MAX_REFERENCE_FRAMES};
 use crate::synthesis::{ggml_device, EngineOptions, Sampling, Stop};
 use anyhow::{bail, Context, Result};
 use libloading::Library;
@@ -85,6 +86,7 @@ struct Api {
     init: unsafe extern "C" fn(*const Init) -> *mut c_void,
     free: unsafe extern "C" fn(*mut c_void),
     model_type: unsafe extern "C" fn(*const c_void) -> *const c_char,
+    num_codebooks: unsafe extern "C" fn(*const c_void) -> i32,
     extract: unsafe extern "C" fn(*mut c_void, *const f32, i32, *mut Voice) -> i32,
     free_voice: unsafe extern "C" fn(*mut Voice),
     synthesize: unsafe extern "C" fn(*mut c_void, *const Params, *mut Audio) -> i32,
@@ -169,6 +171,7 @@ impl Api {
                 init: symbol(&library, b"qt_init\0")?,
                 free: symbol(&library, b"qt_free\0")?,
                 model_type: symbol(&library, b"qt_model_type\0")?,
+                num_codebooks: symbol(&library, b"qt_num_codebooks\0")?,
                 extract: symbol(&library, b"qt_extract_voice_ref\0")?,
                 free_voice: symbol(&library, b"qt_voice_ref_free\0")?,
                 synthesize: symbol(&library, b"qt_synthesize\0")?,
@@ -188,16 +191,28 @@ pub(crate) struct Session {
     language: CString,
     model_path: PathBuf,
     codec_path: PathBuf,
+    reference_sha256: Option<String>,
 }
 enum Conditioning {
     Reference(CString),
-    Frozen { values: Vec<f32>, seed: i64 },
-    Description { instruction: CString, seed: i64 },
+    Frozen {
+        values: Vec<f32>,
+        seed: i64,
+    },
+    Icl {
+        prompt: Box<FrozenIcl>,
+        transcript: CString,
+        seed: i64,
+    },
+    Description {
+        instruction: CString,
+        seed: i64,
+    },
 }
 impl Conditioning {
     fn expected_model_type(&self) -> &'static str {
         match self {
-            Self::Reference(_) | Self::Frozen { .. } => "base",
+            Self::Reference(_) | Self::Frozen { .. } | Self::Icl { .. } => "base",
             Self::Description { .. } => "voice_design",
         }
     }
@@ -206,6 +221,9 @@ impl Conditioning {
         match self {
             Self::Reference(transcript) => (transcript.as_ptr(), ptr::null(), -1),
             Self::Frozen { seed, .. } => (ptr::null(), ptr::null(), *seed),
+            Self::Icl {
+                transcript, seed, ..
+            } => (transcript.as_ptr(), ptr::null(), *seed),
             Self::Description { instruction, seed } => (ptr::null(), instruction.as_ptr(), *seed),
         }
     }
@@ -297,7 +315,65 @@ impl Session {
             },
         )
     }
-    /// Copy the exact native speaker vector; does not carry ICL codes or normalize it.
+    pub(crate) fn load_frozen_icl(
+        model: &Path,
+        prompt: &FrozenIcl,
+        language: &str,
+        seed: i64,
+        options: &EngineOptions,
+    ) -> Result<Self> {
+        prompt.validate()?;
+        let (talker, codec) = assets(model, options.codec.as_deref())?;
+        prompt.speaker.require_scope(&native_scope(
+            &talker,
+            &codec,
+            prompt.speaker.values.len(),
+        )?)?;
+        let conditioning = Conditioning::Icl {
+            prompt: Box::new(prompt.clone()),
+            transcript: ctext(&prompt.context.text)?,
+            seed,
+        };
+        let session = Self::initialize(model, language, options, conditioning)?;
+        if unsafe { (session.api.num_codebooks)(session.context) }
+            != prompt.context.codebooks as i32
+        {
+            bail!("loaded model codebook count differs from frozen ICL context");
+        }
+        Ok(session)
+    }
+    /// Export both latents and the original reference text, never the generated audition text.
+    pub(crate) fn frozen_icl(&self) -> Result<FrozenIcl> {
+        match &self.conditioning {
+            Conditioning::Icl { prompt, .. } => Ok((**prompt).clone()),
+            Conditioning::Reference(transcript) => {
+                if self.voice.codes.is_null()
+                    || self.voice.codebooks != CODEBOOKS as i32
+                    || !(1..=MAX_REFERENCE_FRAMES as i32).contains(&self.voice.frames)
+                {
+                    bail!("native reference has invalid/unsupported ICL code shape");
+                }
+                let count = self.voice.codebooks as usize * self.voice.frames as usize;
+                // Pinned ABI owns K*T readable int32 codes until the session is dropped.
+                let codes = unsafe { std::slice::from_raw_parts(self.voice.codes, count) }.to_vec();
+                let speaker = self.frozen_conditioning()?;
+                let context = IclContext::from_native(
+                    speaker.scope.clone(),
+                    self.voice.frames as usize,
+                    codes,
+                    transcript.to_str()?.to_owned(),
+                    self.reference_sha256
+                        .clone()
+                        .context("missing reference provenance")?,
+                )?;
+                FrozenIcl::new(speaker, context)
+            }
+            _ => bail!(
+                "this session has no ICL reference context; no extraction/substitution fallback"
+            ),
+        }
+    }
+    /// Explicit vector-only export; full ICL must use frozen_icl so context is not discarded.
     pub(crate) fn frozen_conditioning(&self) -> Result<FrozenConditioning> {
         let values = match &self.conditioning {
             Conditioning::Frozen {values, ..} => values.clone(),
@@ -308,6 +384,7 @@ impl Session {
                 // Pinned ABI owns dim finite-readable values until this session is dropped.
                 unsafe { std::slice::from_raw_parts(self.voice.embedding, self.voice.dim as usize) }.to_vec()
             },
+            Conditioning::Icl {..} => bail!("use frozen_icl to export this full prompt; no implicit vector-only downgrade"),
             Conditioning::Description { .. } => bail!("VoiceDesign has no directly exportable Base speaker vector; audition then encode with the chosen Base checkpoint"),
         };
         let result = FrozenConditioning {
@@ -358,6 +435,7 @@ impl Session {
             language,
             model_path,
             codec_path,
+            reference_sha256: None,
         };
         let actual = unsafe { (session.api.model_type)(session.context) };
         if actual.is_null() {
@@ -370,6 +448,7 @@ impl Session {
         Ok(session)
     }
     fn prepare_reference(&mut self, reference: &Path) -> Result<()> {
+        let source_hash = hash_file(reference)?;
         let (samples, rate) = crate::audio::load_wav_file(
             reference.to_str().context("reference path must be UTF-8")?,
         )?;
@@ -387,12 +466,39 @@ impl Session {
         if status != 0 {
             bail!("libqwen reference extraction: {}", error_text(&self.api));
         }
+        if hash_file(reference)? != source_hash {
+            bail!("reference audio changed during extraction");
+        }
+        self.reference_sha256 = Some(source_hash);
         Ok(())
+    }
+    fn latents(&self) -> Result<(*const f32, i32, *const i32, i32)> {
+        match &self.conditioning {
+            Conditioning::Frozen { values, .. } => Ok((
+                values.as_ptr(),
+                i32::try_from(values.len())?,
+                ptr::null(),
+                0,
+            )),
+            Conditioning::Icl { prompt, .. } => Ok((
+                prompt.speaker.values.as_ptr(),
+                i32::try_from(prompt.speaker.values.len())?,
+                prompt.context.codes.as_ptr(),
+                i32::try_from(prompt.context.frames)?,
+            )),
+            _ => Ok((
+                self.voice.embedding,
+                self.voice.dim,
+                self.voice.codes,
+                self.voice.frames,
+            )),
+        }
     }
     fn params(&self, text: &CString, sampling: &Sampling) -> Result<Params> {
         let max =
             i32::try_from(sampling.max_new_tokens).context("frame cap exceeds native range")?;
         let (transcript, instruct, seed) = self.conditioning.fields();
+        let (embedding, embedding_dim, codes, reference_frames) = self.latents()?;
         Ok(Params {
             abi: ABI,
             text: text.as_ptr(),
@@ -408,7 +514,9 @@ impl Session {
             top_k: i32::try_from(sampling.top_k)?,
             top_p: 1.0,
             penalty: match &self.conditioning {
-                Conditioning::Reference(_) | Conditioning::Frozen { .. } => 1.5,
+                Conditioning::Reference(_)
+                | Conditioning::Frozen { .. }
+                | Conditioning::Icl { .. } => 1.5,
                 Conditioning::Description { .. } => 1.05,
             },
             sub_temperature: sampling.temperature as f32,
@@ -419,16 +527,10 @@ impl Session {
             cancel_user: ptr::null_mut(),
             chunk: None,
             chunk_user: ptr::null_mut(),
-            embedding: match &self.conditioning {
-                Conditioning::Frozen { values, .. } => values.as_ptr(),
-                _ => self.voice.embedding,
-            },
-            embedding_dim: match &self.conditioning {
-                Conditioning::Frozen { values, .. } => i32::try_from(values.len())?,
-                _ => self.voice.dim,
-            },
-            codes: self.voice.codes,
-            reference_frames: self.voice.frames,
+            embedding,
+            embedding_dim,
+            codes,
+            reference_frames,
         })
     }
     pub(crate) fn synthesize<F, C>(
