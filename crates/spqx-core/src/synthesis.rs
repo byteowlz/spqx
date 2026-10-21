@@ -140,6 +140,17 @@ pub fn ggml_device(device: &str) -> Result<Option<String>> {
     Ok(Some(value.to_owned()))
 }
 
+/// What a session is conditioned on: a reference recording or a description.
+pub(crate) enum Request<'a> {
+    Reference {
+        audio: &'a Path,
+        transcript: &'a str,
+    },
+    Design {
+        description: &'a str,
+        seed: Option<u64>,
+    },
+}
 /// One loaded engine with checkpoint-scoped reference or description conditioning.
 /// A description session samples candidates; it does not establish a persistent voice identity.
 pub struct Session {
@@ -164,23 +175,19 @@ impl Session {
         if transcript.trim().is_empty() {
             bail!("reference transcript must not be empty");
         }
-        let kind = select_backend(model, options.backend)?;
-        let inner = match kind {
-            #[cfg(any(spqx_mlx, feature = "tch-backend"))]
-            Backend::Mlx | Backend::Tch => Inner::Native(Box::new(NativeSession::load(
-                model, reference, transcript, language, options,
-            )?)),
-            #[cfg(feature = "qwentts")]
-            Backend::Ggml => Inner::Ggml(crate::ggml::Session::load(
-                model, reference, transcript, language, options,
-            )?),
-            _ => bail!("engine is not compiled in"),
-        };
-        Ok(Self { kind, inner })
+        Self::load_request(
+            model,
+            language,
+            options,
+            Request::Reference {
+                audio: reference,
+                transcript,
+            },
+        )
     }
     /// Load a VoiceDesign checkpoint once, without reference audio or a preset speaker.
     /// Repeated synthesis reuses the model and description, not an enrolled identity.
-    /// Only the pinned GGML engine implements this operation; no backend/SDK fallback.
+    /// Implemented by the pinned GGML engine and native MLX; no backend/SDK fallback.
     /// A seed is scoped to this engine/checkpoint, not portable voice conditioning.
     pub fn load_voice_design(
         model: &Path,
@@ -190,15 +197,39 @@ impl Session {
         options: &EngineOptions,
     ) -> Result<Self> {
         let seed = validate_design(description, language, seed)?;
+        Self::load_request(
+            model,
+            language,
+            options,
+            Request::Design {
+                description,
+                seed: u64::try_from(seed).ok(),
+            },
+        )
+    }
+    /// The single engine-dispatch path; each engine receives the same request kind.
+    fn load_request(
+        model: &Path,
+        language: &str,
+        options: &EngineOptions,
+        request: Request<'_>,
+    ) -> Result<Self> {
         let kind = select_backend(model, options.backend)?;
-        let inner = match kind {
+        let inner: Result<Inner> = match kind {
+            #[cfg(any(spqx_mlx, feature = "tch-backend"))]
+            Backend::Mlx | Backend::Tch => Ok(Inner::Native(Box::new(NativeSession::load(
+                model, language, options, request,
+            )?))),
             #[cfg(feature = "qwentts")]
-            Backend::Ggml => Inner::Ggml(crate::ggml::Session::load_voice_design(
-                model, description, language, seed, options,
-            )?),
-            _ => bail!("VoiceDesign is not implemented for {kind:?}; use a VoiceDesign GGUF checkpoint with the pinned GGML runtime (no fallback)"),
+            Backend::Ggml => Ok(Inner::Ggml(crate::ggml::Session::open(
+                model, language, options, request,
+            )?)),
+            _ => bail!("engine {kind:?} is not compiled in"),
         };
-        Ok(Self { kind, inner })
+        Ok(Self {
+            kind,
+            inner: inner?,
+        })
     }
     /// Selected engine name (not a claim that an automatic device was observed).
     pub fn backend_name(&self) -> &'static str {
@@ -221,8 +252,8 @@ impl Session {
         F: FnMut(&[f32], u32) -> bool + Send,
         C: Fn() -> bool + Send + Sync,
     {
-        if text.trim().is_empty() {
-            bail!("empty synthesis text");
+        if text.trim().is_empty() || text.contains('\0') {
+            bail!("synthesis text must be nonempty and without NUL");
         }
         if sampling.max_new_tokens <= 0
             || sampling.chunk_size == 0
@@ -235,15 +266,34 @@ impl Session {
             #[cfg(any(spqx_mlx, feature = "tch-backend"))]
             Inner::Native(native) => {
                 let mut audio = audio;
-                let stop = native.inference.generate_with_icl_session_streaming(
-                    &native.reference,
-                    text,
-                    sampling.temperature,
-                    sampling.top_k,
-                    sampling.max_new_tokens,
-                    sampling.chunk_size,
-                    |samples, rate| !cancelled() && audio(samples, rate),
-                )?;
+                let deliver = |samples: &[f32], rate| !cancelled() && audio(samples, rate);
+                let stop = match &native.mode {
+                    NativeMode::Reference(reference) => {
+                        native.inference.generate_with_icl_session_streaming(
+                            reference,
+                            text,
+                            sampling.temperature,
+                            sampling.top_k,
+                            sampling.max_new_tokens,
+                            sampling.chunk_size,
+                            deliver,
+                        )?
+                    }
+                    #[cfg(spqx_mlx)]
+                    NativeMode::Design { session, seed } => {
+                        // Each request replays the same seeded key sequence.
+                        let _seed = crate::random::SeedGuard::new(*seed);
+                        native.inference.generate_with_design_session_streaming(
+                            session,
+                            text,
+                            sampling.temperature,
+                            sampling.top_k,
+                            sampling.max_new_tokens,
+                            sampling.chunk_size,
+                            deliver,
+                        )?
+                    }
+                };
                 Ok(stop)
             }
             #[cfg(feature = "qwentts")]
@@ -278,17 +328,32 @@ fn validate_design(description: &str, language: &str, seed: Option<u64>) -> Resu
 #[cfg(any(spqx_mlx, feature = "tch-backend"))]
 struct NativeSession {
     inference: crate::inference::TTSInference,
-    reference: crate::inference::IclSession,
+    mode: NativeMode,
+}
+#[cfg(any(spqx_mlx, feature = "tch-backend"))]
+enum NativeMode {
+    Reference(crate::inference::IclSession),
+    #[cfg(spqx_mlx)]
+    Design {
+        session: crate::inference::DesignSession,
+        seed: Option<u64>,
+    },
 }
 #[cfg(any(spqx_mlx, feature = "tch-backend"))]
 impl NativeSession {
     fn load(
         model: &Path,
-        reference: &Path,
-        transcript: &str,
         language: &str,
         options: &EngineOptions,
+        request: Request<'_>,
     ) -> Result<Self> {
+        if matches!(request, Request::Design { .. }) {
+            return Self::load_design(model, language, options, request);
+        }
+        let (reference, transcript) = match request {
+            Request::Reference { audio, transcript } => (audio, transcript),
+            Request::Design { .. } => unreachable!("handled above"),
+        };
         use crate::{
             audio::{load_wav_file, resample},
             audio_encoder::AudioEncoder,
@@ -331,7 +396,37 @@ impl NativeSession {
         let reference = inference.prepare_icl_session(transcript, &codes, &embedding, language)?;
         Ok(Self {
             inference,
-            reference,
+            mode: NativeMode::Reference(reference),
+        })
+    }
+    #[cfg(spqx_mlx)]
+    fn load_design(
+        model: &Path,
+        language: &str,
+        options: &EngineOptions,
+        request: Request<'_>,
+    ) -> Result<Self> {
+        let Request::Design { description, seed } = request else {
+            bail!("MLX design loader requires a description request");
+        };
+        if !model.is_dir() {
+            bail!("MLX VoiceDesign requires a local checkpoint directory");
+        }
+        if !options.device.eq_ignore_ascii_case("auto")
+            && !options.device.eq_ignore_ascii_case("metal")
+            && !options.device.eq_ignore_ascii_case("gpu")
+        {
+            bail!("MLX requires its Metal device; select GGML plus GGUF assets for another device");
+        }
+        // Reject the wrong checkpoint before loading gigabytes of weights.
+        let config = crate::config::Qwen3TTSConfig::from_file(&model.join("config.json"))?;
+        crate::voice_design::check_model(&config)?;
+        crate::backend::mlx::stream::init_mlx(true);
+        let inference = crate::inference::TTSInference::new(model, crate::tensor::Device::Cpu)?;
+        let session = inference.prepare_voice_design_session(description, language)?;
+        Ok(Self {
+            inference,
+            mode: NativeMode::Design { session, seed },
         })
     }
 }

@@ -16,7 +16,7 @@ A per-repository OS file lock serializes consumers. Files stream into same-direc
 
 ## Operation-compatible profiles
 
-Profiles carry a synthesis purpose (`clone` or `design`) and engine. `say`/`serve` and the default `models download` select Base-cloning assets. `design` and `models download --purpose design` select the pinned 1.7B VoiceDesign Q8 talker plus F32 codec on GGML. A GGML design profile resolves to its exact talker entrypoint, even when Base weights share the same repository snapshot. Explicit model paths and custom cache-only IDs retain their existing ownership rules. Unsupported engine/operation pairs fail before downloading incompatible weights or choosing another backend. MLX VoiceDesign is not yet supported by this extension.
+Profiles carry a synthesis purpose (`clone` or `design`) and engine. `say`/`serve` and the default `models download` select Base-cloning assets. `design` and `models download --purpose design` select the pinned 1.7B VoiceDesign GGUF talker plus F32 codec on GGML. A GGML design profile resolves to its exact talker entrypoint, even when Base weights share the same repository snapshot. Explicit model paths and custom cache-only IDs retain their existing ownership rules. On Apple Silicon MLX the design purpose selects its own pinned 1.7B 6-bit snapshot (13 files, revision- and SHA256-pinned). Design paths are configured separately (`model.design_path`), so cloning settings never select design weights. Unsupported engine/operation pairs fail before downloading incompatible weights or choosing another backend.
 
 ## Proof
 

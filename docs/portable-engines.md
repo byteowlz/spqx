@@ -99,7 +99,7 @@ spqx --backend ggml --device cuda:0 serve \
   --ref-audio reference.wav --ref-text-file reference.txt
 ```
 
-For description-only generation with a separate VoiceDesign checkpoint, see [native VoiceDesign](voice-design.md). This does not add a worker opcode, enable MLX VoiceDesign or change the reference-cloning mode below.
+For description-only generation with a separate VoiceDesign checkpoint, see [native VoiceDesign](voice-design.md). This adds no worker opcode and does not change the reference-cloning mode below; MLX description-only generation is implemented separately in the same document.
 
 Use a lawful, same-language reference with its matching transcript. Conditioning remains checkpoint-scoped. Registry identity does not make it cross-engine enrollment or give turn/session authority.
 

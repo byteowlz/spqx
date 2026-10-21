@@ -42,8 +42,11 @@ pub struct Config {
 pub struct ModelConfig {
     /// Hugging Face model ID. Built-in profiles are revision/SHA256 pinned.
     pub id: String,
-    /// Explicit local model directory; takes precedence over `id`.
+    /// Explicit local cloning model directory; takes precedence over `id`.
     pub path: Option<String>,
+    /// Explicit local VoiceDesign checkpoint (MLX directory or GGUF talker). Unset:
+    /// `design` uses the pinned profile for the engine. `id`/`path` never apply to it.
+    pub design_path: Option<String>,
     /// Fetch missing/corrupt files for a built-in model on first use.
     pub auto_download: bool,
     /// Never contact model servers; require an intact local snapshot.
@@ -64,6 +67,7 @@ impl Default for ModelConfig {
             }
             .to_string(),
             path: None,
+            design_path: None,
             auto_download: true,
             offline: false,
         }

@@ -10,9 +10,14 @@ check-portable:
 test-portable:
     cargo test --locked -p spqx-core -p spqx-cli --no-default-features --features qwentts --lib --bins --tests
 
-# Explicit VoiceDesign GGUF assets and fresh compute admission required; see docs/voice-design.md.
+# Explicit VoiceDesign assets and fresh compute admission required; see docs/voice-design.md.
+# SPQX_DESIGN_BACKEND=mlx uses SPQX_DESIGN_ASSETS as a VoiceDesign snapshot directory
+# and SPQX_DESIGN_WRONG as a Base snapshot; the default GGML path keeps the GGUF layout.
 test-native-design:
     cargo test --locked -p spqx-core --no-default-features --features qwentts --test voice_design -- --ignored --nocapture
+
+test-native-design-mlx:
+    cargo test --locked --release -p spqx-core --no-default-features --features mlx,qwentts --test voice_design -- --ignored --nocapture
 
 test-native-cpu:
     cargo test --locked -p spqx-core --no-default-features --features qwentts --test native_cpu -- --ignored --nocapture

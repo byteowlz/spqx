@@ -781,9 +781,5 @@ pub fn random_categorical(logits: &MlxArray, axis: i32, _num_samples: i32) -> Ml
 
 /// Generate a pseudo-random seed from system entropy.
 fn rand_seed() -> u64 {
-    use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(42)
+    crate::random::next_seed()
 }

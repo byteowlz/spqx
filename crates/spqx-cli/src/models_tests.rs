@@ -121,7 +121,7 @@ fn offline_missing_cache_does_not_create_state_or_contact_server() {
 #[test]
 fn catalog_is_pinned_and_paths_are_confined() {
     let catalog = profiles().unwrap();
-    assert_eq!(catalog.len(), 3);
+    assert_eq!(catalog.len(), 4);
     use spqx_core::synthesis::Backend;
     let base_id = &catalog[0].repo;
     let design = select_profile(&catalog, base_id, Backend::Ggml, Purpose::Design)
@@ -142,11 +142,26 @@ fn catalog_is_pinned_and_paths_are_confined() {
             .purpose,
         Purpose::Clone
     );
-    assert!(select_profile(&catalog, base_id, Backend::Mlx, Purpose::Design).is_err());
+    let mlx = select_profile(&catalog, base_id, Backend::Mlx, Purpose::Design)
+        .unwrap()
+        .unwrap();
+    assert!(mlx.repo.contains("VoiceDesign") && mlx.entrypoint.is_none());
+    assert!(mlx
+        .files
+        .iter()
+        .any(|asset| asset.path == "speech_tokenizer/model.safetensors"));
+    // Auto follows the configured built-in profile's engine; Base remains the clone default.
+    let auto = select_profile(&catalog, base_id, Backend::Auto, Purpose::Design)
+        .unwrap()
+        .unwrap();
+    assert_eq!(auto.backend, catalog[0].backend);
+    assert!(select_profile(&catalog, base_id, Backend::Tch, Purpose::Design).is_err());
     assert!(
         select_profile(&catalog, "custom/model", Backend::Ggml, Purpose::Design)
             .unwrap()
-            .is_none()
+            .is_some_and(
+                |profile| profile.purpose == Purpose::Design && profile.backend == Backend::Ggml
+            )
     );
     for p in catalog {
         assert_eq!(p.revision.len(), 40);
@@ -164,6 +179,37 @@ fn catalog_is_pinned_and_paths_are_confined() {
         };
         assert!(asset_path(Path::new("cache"), &a).is_err());
     }
+}
+#[test]
+fn cloning_model_settings_never_select_voice_design_weights() {
+    use spqx_core::synthesis::Backend;
+    let catalog = profiles().unwrap();
+    // A custom cloning model ID stays cache-only for cloning, but design still
+    // gets the pinned VoiceDesign profile for this build's default engine.
+    let custom = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit";
+    assert!(
+        select_profile(&catalog, custom, Backend::Auto, Purpose::Clone)
+            .unwrap()
+            .is_none()
+    );
+    let design = select_profile(&catalog, custom, Backend::Auto, Purpose::Design)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (design.purpose, design.backend),
+        (Purpose::Design, default_backend())
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.model.path = Some(temp.path().join("base-only").display().to_string());
+    config.model.design_path = Some(temp.path().display().to_string());
+    assert_eq!(resolve_for(&config, Purpose::Design).unwrap(), temp.path());
+    assert!(resolve_for(&config, Purpose::Clone).is_err());
+    config.model.design_path = Some(temp.path().join("missing").display().to_string());
+    assert!(resolve_for(&config, Purpose::Design)
+        .unwrap_err()
+        .to_string()
+        .contains("model.design_path"));
 }
 #[test]
 fn explicit_path_is_local_and_never_replaced() {

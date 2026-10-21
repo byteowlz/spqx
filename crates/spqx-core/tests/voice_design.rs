@@ -13,44 +13,41 @@ use std::{
 const DESCRIPTION: &str = "A fictional adult male voice with clear native standard German pronunciation. Calm, friendly and conversational, moderately low pitch. No singing or whispering.";
 
 #[test]
-#[ignore = "requires explicit VoiceDesign GGUF assets, pinned runtime and fresh compute admission"]
+#[ignore = "requires explicit VoiceDesign assets, a native engine and fresh compute admission"]
 fn native_voice_design_contract() -> Result<()> {
     let _guard = spqx_core::stdio::StdoutGuard::new()?;
-    let root = PathBuf::from(std::env::var("SPQX_DESIGN_ASSETS")?);
     let output = PathBuf::from(std::env::var("SPQX_DESIGN_OUTPUT")?);
     std::fs::create_dir(&output).context("use a fresh private output directory")?;
-    let options = EngineOptions {
-        backend: Backend::Ggml,
-        device: std::env::var("SPQX_DESIGN_DEVICE")?,
-        library: Some(std::env::var("SPQX_DESIGN_LIBRARY")?.into()),
-        codec: Some(root.join("qwen-tokenizer-12hz-F32.gguf")),
-    };
+    let assets = Assets::from_env()?;
     // Reject and release the wrong-model context BEFORE loading the design model.
     let wrong = Session::load_voice_design(
-        &root.join("base.gguf"),
+        &assets.wrong,
         DESCRIPTION,
         "german",
         Some(4242),
-        &options,
+        &assets.options,
     );
-    ensure!(wrong
+    let wrong = wrong
         .err()
         .context("Base accepted as VoiceDesign")?
-        .to_string()
-        .contains("requires voice_design"));
+        .to_string();
+    ensure!(
+        wrong.contains("voice_design"),
+        "unexpected rejection: {wrong}"
+    );
     let prepare = Instant::now();
     let session = Session::load_voice_design(
-        &root.join("qwen-talker-1.7b-voicedesign-Q8_0.gguf"),
+        &assets.model,
         DESCRIPTION,
         "german",
         Some(4242),
-        &options,
+        &assets.options,
     )?;
     eprintln!(
         "VoiceDesign prepare_s={:.6}",
         prepare.elapsed().as_secs_f64()
     );
-    ensure!(session.backend_name() == "ggml");
+    ensure!(session.backend_name() == assets.engine);
     let sampling = Sampling {
         temperature: 0.9,
         top_k: 50,
@@ -68,6 +65,18 @@ fn native_voice_design_contract() -> Result<()> {
         &output.join("candidate-0.wav"),
     )?;
     check_interruptions(&session, &sampling, texts[0])?;
+    // A seeded loaded session replays the same candidate after interruptions.
+    render(
+        &session,
+        &sampling,
+        texts[0],
+        &output.join("candidate-0-repeat.wav"),
+    )?;
+    eprintln!(
+        "seeded_repeat_identical={}",
+        std::fs::read(output.join("candidate-0.wav"))?
+            == std::fs::read(output.join("candidate-0-repeat.wav"))?
+    );
     // EOS after active cancellation, cap and malformed input proves retained-session recovery.
     render(
         &session,
@@ -76,6 +85,45 @@ fn native_voice_design_contract() -> Result<()> {
         &output.join("candidate-1.wav"),
     )?;
     Ok(())
+}
+
+/// Local assets plus the engine they belong to.
+struct Assets {
+    options: EngineOptions,
+    model: PathBuf,
+    wrong: PathBuf,
+    engine: &'static str,
+}
+
+impl Assets {
+    /// `SPQX_DESIGN_BACKEND=mlx`: ASSETS is the VoiceDesign snapshot directory and
+    /// SPQX_DESIGN_WRONG a Base snapshot. The default GGML path keeps the GGUF layout.
+    fn from_env() -> Result<Self> {
+        let root = PathBuf::from(std::env::var("SPQX_DESIGN_ASSETS")?);
+        if std::env::var("SPQX_DESIGN_BACKEND").as_deref() == Ok("mlx") {
+            return Ok(Self {
+                options: EngineOptions {
+                    backend: Backend::Mlx,
+                    device: "auto".into(),
+                    ..EngineOptions::default()
+                },
+                model: root,
+                wrong: PathBuf::from(std::env::var("SPQX_DESIGN_WRONG")?),
+                engine: "mlx",
+            });
+        }
+        Ok(Self {
+            options: EngineOptions {
+                backend: Backend::Ggml,
+                device: std::env::var("SPQX_DESIGN_DEVICE")?,
+                library: Some(std::env::var("SPQX_DESIGN_LIBRARY")?.into()),
+                codec: Some(root.join("qwen-tokenizer-12hz-F32.gguf")),
+            },
+            model: root.join("qwen-talker-1.7b-voicedesign-Q8_0.gguf"),
+            wrong: root.join("base.gguf"),
+            engine: "ggml",
+        })
+    }
 }
 
 fn check_interruptions(session: &Session, sampling: &Sampling, text: &str) -> Result<()> {

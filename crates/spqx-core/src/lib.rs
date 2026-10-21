@@ -44,8 +44,12 @@ pub mod error;
 #[cfg(feature = "qwentts")]
 mod ggml;
 pub mod postprocess;
+#[cfg(any(spqx_mlx, test))]
+mod random;
 pub mod stdio;
 pub mod synthesis;
+#[cfg(any(spqx_mlx, feature = "tch-backend", test))]
+mod voice_design;
 pub mod worker;
 
 #[cfg(all(feature = "legacy-api", any(spqx_mlx, feature = "tch-backend")))]

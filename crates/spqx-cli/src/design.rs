@@ -1,5 +1,5 @@
 //! Description-only native voice candidates. No registry/reference fallback or enrollment.
-use std::{io::Write, path::PathBuf};
+use std::{io::Write, path::PathBuf, time::Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
@@ -24,7 +24,39 @@ pub struct DesignArgs {
     pub out: PathBuf,
 }
 
+/// One accepted candidate plus the seeds rejected on the way to it.
+struct Candidate {
+    seed: u64,
+    rejected: Vec<u64>,
+    samples: Vec<f32>,
+    stats: engine::SynthStats,
+    prepare_s: f64,
+    model: PathBuf,
+    language: String,
+}
+
 pub fn run(args: DesignArgs, common: &CommonOpts) -> Result<()> {
+    let started = Instant::now();
+    let config = validate(&args, common)?;
+    let out = crate::say::resolve_out(&config, &args.out);
+    if out.exists() {
+        bail!("candidate output already exists: {}", out.display());
+    }
+    let candidate = produce(&config, &args)?;
+    // Candidate audio is not trimmed, denoised or regenerated after selection.
+    write_candidate(&out, &candidate.samples, candidate.stats.sample_rate)?;
+    report(
+        common,
+        &args,
+        &out,
+        &candidate,
+        started.elapsed().as_secs_f64(),
+    );
+    Ok(())
+}
+
+/// Resolve language/output rate and reject an unusable request before any engine work.
+fn validate(args: &DesignArgs, common: &CommonOpts) -> Result<crate::config::Config> {
     if args.text.trim().is_empty() {
         bail!("VoiceDesign requires nonempty spoken text");
     }
@@ -35,54 +67,105 @@ pub fn run(args: DesignArgs, common: &CommonOpts) -> Result<()> {
     if config.audio.sample_rate_hz != 24000 {
         bail!("VoiceDesign candidates require native 24000 Hz output; set audio.sample_rate_hz = 24000");
     }
-    let out = crate::say::resolve_out(&config, &args.out);
-    if out.exists() {
-        bail!("candidate output already exists: {}", out.display());
+    Ok(config)
+}
+
+/// Each attempt is one independent, reproducible sample. A sample that misses
+/// EOS (e.g. a silence runaway) or is silent is rejected, never trimmed.
+fn produce(config: &crate::config::Config, args: &DesignArgs) -> Result<Candidate> {
+    let mut rejected = Vec::new();
+    for seed in attempt_seeds(args.seed) {
+        let mut samples = Vec::new();
+        let (stats, prepare_s, model) =
+            engine::design_streaming(config, &args.instruct, Some(seed), &args.text, |chunk| {
+                samples.extend_from_slice(chunk)
+            })?;
+        match validate_candidate(&samples, stats.eos_reached) {
+            Ok(()) => {
+                return Ok(Candidate {
+                    seed,
+                    rejected,
+                    samples,
+                    stats,
+                    prepare_s,
+                    model,
+                    language: spqx_core::worker::normalize_language(&config.voice.language),
+                });
+            }
+            Err(error) => {
+                eprintln!("VoiceDesign seed {seed} rejected: {error}");
+                rejected.push(seed);
+            }
+        }
     }
-    let started = std::time::Instant::now();
-    let mut samples = Vec::new();
-    let (stats, prepare_s, model) =
-        engine::design_streaming(&config, &args.instruct, args.seed, &args.text, |chunk| {
-            samples.extend_from_slice(chunk)
-        })?;
-    validate_candidate(&samples, stats.eos_reached)?;
-    // Candidate audio is not trimmed, denoised or regenerated after selection.
+    bail!(
+        "no complete VoiceDesign candidate from seed(s) {rejected:?}; incomplete samples are not saved. Retry, or pick another --seed"
+    )
+}
+
+fn write_candidate(out: &std::path::Path, samples: &[f32], rate: u32) -> Result<()> {
     if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    let bytes = spqx_core::audio::write_wav_bytes(&samples, stats.sample_rate)?;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&out)
+        .open(out)
         .with_context(|| format!("creating candidate without overwriting {}", out.display()))?;
-    file.write_all(&bytes)?;
+    file.write_all(&spqx_core::audio::write_wav_bytes(samples, rate)?)?;
     file.sync_all()?;
+    Ok(())
+}
+
+fn report(
+    common: &CommonOpts,
+    args: &DesignArgs,
+    out: &std::path::Path,
+    c: &Candidate,
+    elapsed_s: f64,
+) {
     if common.json {
         println!(
             "{}",
             serde_json::json!({
-                "operation": "voice_design", "backend": stats.backend,
-                "model": model,
+                "operation": "voice_design", "backend": c.stats.backend,
+                "model": c.model,
                 "text": args.text, "description": args.instruct,
-                "language": spqx_core::worker::normalize_language(&config.voice.language),
-                "seed": args.seed, "sample_rate": stats.sample_rate,
-                "prepare_ms": prepare_s * 1000.0,
-                "first_pcm_ms_after_prepare": stats.ttfa_s * 1000.0,
-                "generation_wall_s": stats.wall_s,
-                "total_wall_s": started.elapsed().as_secs_f64(), "audio_s": stats.audio_s,
-                "eos_reached": stats.eos_reached, "wav": out,
+                "language": c.language,
+                "seed": c.seed,
+                "seed_source": if args.seed.is_some() { "explicit" } else { "random" },
+                "rejected_seeds": c.rejected, "sample_rate": c.stats.sample_rate,
+                "prepare_ms": c.prepare_s * 1000.0,
+                "first_pcm_ms_after_prepare": c.stats.ttfa_s * 1000.0,
+                "generation_wall_s": c.stats.wall_s,
+                "total_wall_s": elapsed_s, "audio_s": c.stats.audio_s,
+                "eos_reached": c.stats.eos_reached, "wav": out,
                 "canonical_voice_id": null, "registry_promoted": false,
             })
         );
     } else if !common.quiet {
         eprintln!(
-            "VoiceDesign candidate -> {} ({:.2}s audio; no registry enrollment)",
+            "VoiceDesign candidate -> {} ({:.2}s audio, seed {}; no registry enrollment)",
             out.display(),
-            stats.audio_s
+            c.stats.audio_s,
+            c.seed
         );
     }
-    Ok(())
+}
+
+/// Unseeded requests get up to three recorded random seeds; an explicit seed is
+/// deterministic, so it gets exactly one attempt.
+fn attempt_seeds(seed: Option<u64>) -> Vec<u64> {
+    use std::hash::BuildHasher;
+    match seed {
+        Some(seed) => vec![seed],
+        None => {
+            let random = std::collections::hash_map::RandomState::new();
+            (0..3u64)
+                .map(|attempt| random.hash_one(attempt) & i64::MAX as u64)
+                .collect()
+        }
+    }
 }
 
 fn validate_candidate(samples: &[f32], eos: bool) -> Result<()> {
@@ -101,6 +184,14 @@ fn validate_candidate(samples: &[f32], eos: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_seed_is_single_attempt_and_random_seeds_are_valid() {
+        assert_eq!(attempt_seeds(Some(4242)), [4242]);
+        let seeds = attempt_seeds(None);
+        assert_eq!(seeds.len(), 3);
+        assert!(seeds.iter().all(|&s| i64::try_from(s).is_ok()));
+        assert!(seeds[0] != seeds[1] && seeds[1] != seeds[2]);
+    }
     #[test]
     fn candidate_success_requires_complete_finite_non_silent_audio() {
         for samples in [

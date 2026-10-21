@@ -92,6 +92,79 @@
   },
   {
     "purpose": "design",
+    "backend": "mlx",
+    "repo": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-6bit",
+    "revision": "ffc6545dc9cb086950aa46c6cd3db490e6ece3e1",
+    "files": [
+      {
+        "path": "README.md",
+        "bytes": 1068,
+        "sha256": "091c543f4d188671e8c01476bd834977607b403272c40a863e195d54baad56ad"
+      },
+      {
+        "path": "config.json",
+        "bytes": 5437,
+        "sha256": "d4f2a4660fdc93e26dae802fadfaf7f5460304f9808715aa3fe2bb4823a6a7bf"
+      },
+      {
+        "path": "generation_config.json",
+        "bytes": 245,
+        "sha256": "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa"
+      },
+      {
+        "path": "merges.txt",
+        "bytes": 1671839,
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+      },
+      {
+        "path": "model.safetensors",
+        "bytes": 2009267875,
+        "sha256": "fb3c35f8ca4165f8824ddfd3f4ba97266bd699b3fb003e3a39084f9d3664ce87"
+      },
+      {
+        "path": "model.safetensors.index.json",
+        "bytes": 71786,
+        "sha256": "4665ebf9c3566d4072268b265de621342ad3c1676cc344dfdb63f7a173bd0bd6"
+      },
+      {
+        "path": "preprocessor_config.json",
+        "bytes": 127,
+        "sha256": "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119"
+      },
+      {
+        "path": "speech_tokenizer/config.json",
+        "bytes": 2336,
+        "sha256": "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167"
+      },
+      {
+        "path": "speech_tokenizer/configuration.json",
+        "bytes": 76,
+        "sha256": "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd"
+      },
+      {
+        "path": "speech_tokenizer/model.safetensors",
+        "bytes": 682293092,
+        "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"
+      },
+      {
+        "path": "speech_tokenizer/preprocessor_config.json",
+        "bytes": 234,
+        "sha256": "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb"
+      },
+      {
+        "path": "tokenizer_config.json",
+        "bytes": 7344,
+        "sha256": "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670"
+      },
+      {
+        "path": "vocab.json",
+        "bytes": 2776833,
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      }
+    ]
+  },
+  {
+    "purpose": "design",
     "backend": "ggml",
     "entrypoint": "qwen-talker-1.7b-voicedesign-Q8_0.gguf",
     "repo": "Serveurperso/Qwen3-TTS-GGUF",

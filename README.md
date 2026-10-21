@@ -77,7 +77,8 @@ above are MLX measurements, not cross-platform or audible-playback guarantees.
 preset speaker. With `--backend ggml`, its pinned VoiceDesign checkpoint and codec
 are downloaded automatically unless offline or an explicit local path is configured.
 Prefetch with `spqx --backend ggml models download --purpose design`. Native GGML/CUDA is
-verified; MLX VoiceDesign remains explicitly unsupported. See
+verified on Linux CUDA, and native MLX VoiceDesign runs on Apple Silicon; other
+engines/devices stay explicit rather than falling back. See
 [usage, model hashes and verification limits](docs/voice-design.md).
 
 ## Requirements (MLX)

@@ -1493,6 +1493,7 @@ impl TalkerModel {
     }
 
     /// Generate codes and call `on_chunk` every `chunk_size` generated frames.
+    #[allow(clippy::too_many_arguments)]
     pub fn generate_codes_streaming<F>(
         &self,
         input_embeddings: &Tensor,
@@ -1502,16 +1503,47 @@ impl TalkerModel {
         eos_code: i64,
         tts_pad_embed: &Tensor,
         chunk_size: usize,
+        on_chunk: F,
+    ) -> (Vec<Vec<i64>>, Stop)
+    where
+        F: FnMut(&[Vec<i64>]) -> bool,
+    {
+        // Python parity: mlx_audio bumps the penalty to max(p, 1.5) for ICL
+        // voice cloning "to prevent code degeneration with long reference
+        // audio prefills".
+        self.generate_codes_streaming_with_penalty(
+            input_embeddings,
+            max_codes,
+            temperature,
+            top_k,
+            1.5,
+            eos_code,
+            tts_pad_embed,
+            None,
+            chunk_size,
+            on_chunk,
+        )
+    }
+
+    /// Streaming code generation with an explicit checkpoint-mode repetition penalty.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_codes_streaming_with_penalty<F>(
+        &self,
+        input_embeddings: &Tensor,
+        max_codes: i64,
+        temperature: f64,
+        top_k: i64,
+        repetition_penalty: f64,
+        eos_code: i64,
+        tts_pad_embed: &Tensor,
+        trailing_text: Option<&Tensor>,
+        chunk_size: usize,
         mut on_chunk: F,
     ) -> (Vec<Vec<i64>>, Stop)
     where
         F: FnMut(&[Vec<i64>]) -> bool,
     {
         let mut stop = Stop::CapReached;
-        // Python parity: mlx_audio bumps the penalty to max(p, 1.5) for ICL
-        // voice cloning "to prevent code degeneration with long reference
-        // audio prefills". This engine's only shipped path is ICL cloning.
-        let repetition_penalty = 1.5;
         let mut all_codes = Vec::new();
         let mut pending_codes = Vec::new();
         let mut past_code_0s: Vec<i64> = Vec::new();
@@ -1611,7 +1643,12 @@ impl TalkerModel {
                 sum
             };
 
-            let next_input = (&code_embeds_sum + tts_pad_embed).to_dtype(DType::BFloat16);
+            // Official streaming text input: decode step k adds trailing text k, then pad.
+            let text_step = match trailing_text {
+                Some(text) if step < text.size()[1] => text.narrow(1, step, 1),
+                _ => tts_pad_embed.shallow_clone(),
+            };
+            let next_input = (&code_embeds_sum + &text_step).to_dtype(DType::BFloat16);
             normed_hidden = self.forward_embeds_with_cache(&next_input, None, &mut caches);
 
             if pending_codes.len() >= chunk_size {
@@ -3241,6 +3278,146 @@ impl TTSInference {
         );
         Ok(stop)
     }
+}
+
+impl TTSInference {
+    /// Prepare a description-only VoiceDesign session: the instruction, role and
+    /// speaker-free codec prefix are embedded once and reused for every request.
+    /// Requires a `voice_design` checkpoint and its speech-tokenizer vocoder.
+    pub fn prepare_voice_design_session(
+        &self,
+        description: &str,
+        language: &str,
+    ) -> Result<DesignSession> {
+        if self.vocoder.is_none() {
+            return Err(Qwen3TTSError::InvalidInput(
+                "VoiceDesign requires speech_tokenizer/model.safetensors; no placeholder audio"
+                    .into(),
+            ));
+        }
+        let description = self
+            .tokenize(description)?
+            .into_iter()
+            .map(i64::from)
+            .collect();
+        let first = |text: &str| -> Result<i64> {
+            self.tokenize(text)?
+                .first()
+                .map(|&id| id as i64)
+                .ok_or_else(|| Qwen3TTSError::Tokenization(format!("cannot tokenize {text:?}")))
+        };
+        let prompt = crate::voice_design::Prompt::new(
+            &self.config,
+            description,
+            (first("user")?, first("\n")?),
+            language,
+        )?;
+        let talker = &self.talker;
+        let text = |ids: &[i64]| talker.embed_text(ids);
+        let tts_pad = text(&[self.config.tts_pad_token_id as i64]);
+        let tts_bos = text(&[self.config.tts_bos_token_id as i64]);
+        let tts_eos = text(&[self.config.tts_eos_token_id as i64]);
+        let codec = talker.embed_codec(&prompt.codec_prefix);
+        let tagged = prompt.codec_prefix.len() as i64 - 1;
+        // Official layout: tts_pad * (tags - 1) + tts_bos over all but the final codec_bos.
+        let text_side = Tensor::cat(
+            &[
+                tts_pad.expand(&[1, tagged - 1, talker.hidden_size], false),
+                tts_bos,
+            ],
+            1,
+        );
+        let prefix = Tensor::cat(
+            &[
+                text(&prompt.instruction),
+                text(&prompt.role),
+                &text_side + &codec.narrow(1, 0, tagged),
+            ],
+            1,
+        );
+        let codec_bos = codec.narrow(1, tagged, 1);
+        for tensor in [&prefix, &codec_bos, &tts_pad, &tts_eos] {
+            tensor.eval();
+        }
+        Ok(DesignSession {
+            prefix,
+            codec_bos,
+            tts_pad,
+            tts_eos,
+            codec_eos_id: self.config.talker_config.codec_eos_token_id as i64,
+        })
+    }
+
+    /// Stream one utterance from a prepared description session (official streaming
+    /// text input, fresh vocoder state, checkpoint repetition penalty 1.05).
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_with_design_session_streaming<F>(
+        &self,
+        session: &DesignSession,
+        text: &str,
+        temperature: f64,
+        top_k: i64,
+        max_codes: i64,
+        chunk_size: usize,
+        mut on_audio: F,
+    ) -> Result<Stop>
+    where
+        F: FnMut(&[f32], u32) -> bool,
+    {
+        let ids: Vec<i64> = self.tokenize(text)?.into_iter().map(i64::from).collect();
+        if ids.is_empty() {
+            return Err(Qwen3TTSError::InvalidInput("empty synthesis text".into()));
+        }
+        let spoken_text = Tensor::cat(
+            &[
+                self.talker.embed_text(&ids),
+                session.tts_eos.shallow_clone(),
+            ],
+            1,
+        );
+        // Official default text input (non_streaming_mode=False): the prefill ends
+        // with the first text token over codec_bos; later text tokens and tts_eos
+        // trail one per decode step, then tts_pad.
+        let first = &spoken_text.narrow(1, 0, 1) + &session.codec_bos;
+        let trailing = spoken_text.narrow(1, 1, ids.len() as i64);
+        let input = Tensor::cat(&[session.prefix.shallow_clone(), first], 1);
+        let effective_max_codes = max_codes.min((ids.len() as i64 * 6).max(75));
+        let vocoder = self.vocoder.as_ref().ok_or_else(|| {
+            Qwen3TTSError::InvalidInput("VoiceDesign vocoder is unavailable".into())
+        })?;
+        let mut state = vocoder.streaming_state();
+        let mut keep_going = true;
+        let (_, stop) = self.talker.generate_codes_streaming_with_penalty(
+            &input,
+            effective_max_codes,
+            temperature,
+            top_k,
+            crate::voice_design::REPETITION_PENALTY,
+            session.codec_eos_id,
+            &session.tts_pad,
+            Some(&trailing),
+            chunk_size,
+            |codes| {
+                if keep_going && !codes.is_empty() {
+                    if let Some(pcm) = self.decode_codes_to_audio_streaming(codes, &mut state) {
+                        keep_going = on_audio(&pcm, 24000);
+                    }
+                }
+                keep_going
+            },
+        );
+        Ok(stop)
+    }
+}
+
+/// Precomputed description conditioning for repeated VoiceDesign requests.
+/// A sampled candidate, not a persistent or enrolled voice identity.
+pub struct DesignSession {
+    prefix: Tensor,
+    codec_bos: Tensor,
+    tts_pad: Tensor,
+    tts_eos: Tensor,
+    codec_eos_id: i64,
 }
 
 /// Synthesis-independent, precomputed embeddings for one ICL reference voice.

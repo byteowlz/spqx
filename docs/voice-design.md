@@ -1,12 +1,16 @@
 # Native VoiceDesign
 
-`spqx design` generates a new described voice, without a reference recording or a preset speaker. It uses the existing whole-pipeline GGML/libqwen engine, not a Python SDK adapter. The model stays loaded across calls to `synthesis::Session`; the CLI is a single-candidate process.
+`spqx design` generates a new described voice, without a reference recording or a preset speaker. It runs on the existing engines: the whole-pipeline GGML/libqwen runtime and native MLX, never a Python SDK adapter. The model stays loaded across calls to `synthesis::Session`; the CLI is a single-candidate process.
 
 ## Use
 
-Use the pinned runtime described in [portable engines](portable-engines.md). With `--backend ggml` and no explicit `model.path`, `design` automatically acquires the pinned 1.7B VoiceDesign Q8 talker and F32 codec below—not the Base-cloning weights. Explicit paths remain local and are never replaced. Offline/auto-download controls apply as usual. MLX VoiceDesign remains unavailable; it never silently selects GGML or downloads an incompatible Base model.
+Use the pinned runtime described in [portable engines](portable-engines.md). With no explicit design path, `design` automatically acquires the operation-compatible pinned VoiceDesign checkpoint for the selected engine—1.7B Q8 GGUF plus F32 codec on GGML, 1.7B 6-bit MLX snapshot on Apple Silicon MLX—never the 0.6B Base-cloning weights. Cloning settings are separate: `model.id`/`model.path` never select VoiceDesign weights, and `model.design_path`/`--backend`/`--device` govern design. Explicit paths stay local and are never replaced; offline/auto-download controls apply as usual.
 
-Prefetch without synthesis using `spqx --backend ggml models download --purpose design`; the default `models download` purpose remains `clone` for ordinary `say`/`serve`.
+Prefetch without synthesis using `models download --purpose design`. The default `models download` purpose remains `clone` for ordinary `say`/`serve`.
+
+On Apple Silicon the default build selects its pinned MLX VoiceDesign snapshot:
+
+- `mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-6bit` at revision `ffc6545dc9cb086950aa46c6cd3db490e6ece3e1`: 13 files, 2,696,098,292 bytes (talker `model.safetensors` 2,009,267,875 bytes and `speech_tokenizer/model.safetensors` 682,293,092 bytes among them).
 
 ```sh
 spqx --backend ggml --device cuda:0 --config config.toml --json design \
@@ -28,11 +32,11 @@ let session = spqx_core::synthesis::Session::load_voice_design(
 // Reuse session.synthesize(text, sampling, audio_callback, cancelled).
 ```
 
-The loaded checkpoint's `qt_model_type` must be exactly `voice_design`. Base and CustomVoice checkpoints fail; changing a flag cannot turn them into VoiceDesign. The native request carries an instruction and seed, with **null** speaker/reference/transcript/embedding/code pointers. Reference cloning keeps its separate constructor and requires `base`. ABI/source pinning, streaming callbacks, cancellation, finite-PCM checks and conservative frame-cap status are reused unchanged.
+The loaded checkpoint type must be exactly `voice_design`: GGML checks libqwen's `qt_model_type`, MLX checks `config.json` before loading weights. Base and CustomVoice checkpoints fail; changing a flag cannot turn them into VoiceDesign. The GGML request carries an instruction and seed with **null** speaker/reference/transcript/embedding/code pointers. MLX builds the official prompt: `<|im_start|>user` description `<|im_end|>`, the assistant role prefix, and a codec prefix with no speaker position, then feeds target text through the official streaming text input (first token over `codec_bos`, the rest and `tts_eos` trailing one per decode step), with a fresh vocoder state per request and the checkpoint's 1.05 repetition penalty. Reference cloning keeps its separate constructor and requires `base`. Streaming callbacks, cancellation, finite-PCM checks and conservative frame-cap status are shared.
 
-Descriptions must be nonblank, NUL-free and at most 4096 UTF-8 bytes. Seeds must fit nonnegative `i64`; omission selects the native random-seed behavior. Reused descriptions sample candidates, not an automatically persistent speaker identity. For later cloning, explicitly select and preserve an audition's raw audio, matching text and provenance.
+Descriptions must be nonblank, NUL-free and at most 4096 UTF-8 bytes. A candidate must reach EOS, and be finite, non-silent and unclipped, or it is rejected unsaved. An explicit `--seed` is one deterministic attempt; if it misses EOS nothing is saved and the CLI says so. An unseeded run tries at most three recorded random seeds and reports the seed used and any rejected seeds. MLX applies a per-request seeded key sequence without touching a global RNG, so a seed request replays the same candidate. Reused descriptions sample candidates, not an automatically persistent speaker identity. For later cloning, explicitly select and preserve an audition's raw audio, matching text and provenance.
 
-MLX and legacy tensor-level VoiceDesign are **not implemented**. They fail explicitly; the old `Qwen3TTSModel::generate_voice_design` no longer reports success with a two-second zero waveform. CustomVoice/preset support and PCA-conditioned synthesis are separate capabilities. No worker opcode was added: description-mode framed-worker startup and Voice Lab integration remain separate work.
+Legacy tensor-level VoiceDesign is **not implemented**; the old `Qwen3TTSModel::generate_voice_design` reports an explicit unsupported error instead of a two-second zero waveform. CustomVoice/preset support and PCA-conditioned synthesis are separate capabilities. No worker opcode was added: description-mode framed-worker startup and Voice Lab integration remain separate work.
 
 ## Verification scope
 
@@ -49,7 +53,11 @@ In the final single run, prepared-session first decoded PCM arrived at 128 ms fo
 
 Fresh non-evicting 5 GiB leases were released after each run. The final guard sampled at most 3,826 MiB owned GPU memory (not a continuous peak), with two CPU cores and a 180-second deadline. No shared workload or service was changed. ASR matched the first passage; on the second Whisper reported one extra `Haha` (1 insertion/11 target words). ASR is a proxy, not listening approval of accent, naturalness or character.
 
-CUDA VoiceDesign is the verified target. CPU, Windows, Vulkan, GGML Metal and MLX VoiceDesign are not qualified by these results. Voice Lab integration, canonical promotion and native PCA are separate feature work, not delivered by this CLI/API slice.
+CUDA VoiceDesign is the verified GGML target; CPU, Windows, Vulkan and GGML Metal are not qualified by these results.
+
+Native MLX VoiceDesign was executed on an Apple Silicon M2 Ultra (macOS 15.7.9) against that pinned snapshot. A loaded description session prepared in 0.52 s; the first decoded PCM arrived 0.14-0.23 s after preparation and complete generation took 1.6-2.0 s for 4.7-6.0 s of audio with EOS. The loaded-session contract passed: Base-as-VoiceDesign rejected, pre-cancel, callback cancel, two-frame cap, malformed `NUL` text and full EOS recovery, plus an identical seeded replay from the same session. A fixed German sentence across eight seeds produced six complete candidates (4.08-4.96 s) whose large-v3-turbo ASR matched the target text exactly, and two rejected attempts. Two seeds rendered in the non-streaming text layout instead ran into the cap at 18.2 s with the speech ending after ~2 s (RMS -83 to -96 dBFS afterwards), which is why the streaming text layout is the implemented one.
+
+The VoiceDesign token layout, seed-key behaviour and checkpoint/language/text validation are covered model-free. Voice Lab integration, canonical promotion and native PCA are separate feature work, not delivered by this CLI/API slice.
 
 ## Main integration validation (2026-10-21)
 

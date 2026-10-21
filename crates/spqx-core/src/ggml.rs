@@ -239,7 +239,27 @@ fn assets(model: &Path, codec: Option<&Path>) -> Result<(PathBuf, PathBuf)> {
     Ok((talker, codec))
 }
 impl Session {
-    pub(crate) fn load(
+    /// Open either conditioning mode; keeps engine-specific constructors private.
+    pub(crate) fn open(
+        model: &Path,
+        language: &str,
+        options: &EngineOptions,
+        request: crate::synthesis::Request<'_>,
+    ) -> Result<Self> {
+        match request {
+            crate::synthesis::Request::Reference { audio, transcript } => {
+                Self::load(model, audio, transcript, language, options)
+            }
+            crate::synthesis::Request::Design { description, seed } => Self::load_voice_design(
+                model,
+                description,
+                language,
+                seed.map_or(-1, |seed| seed as i64),
+                options,
+            ),
+        }
+    }
+    fn load(
         model: &Path,
         reference: &Path,
         transcript: &str,

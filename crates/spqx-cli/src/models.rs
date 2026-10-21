@@ -68,18 +68,23 @@ pub fn resolve(config: &Config) -> Result<PathBuf> {
 }
 
 pub fn resolve_for(config: &Config, purpose: Purpose) -> Result<PathBuf> {
-    if let Some(path) = &config.model.path {
+    // Cloning settings never select VoiceDesign weights, and vice versa.
+    let (key, explicit) = match purpose {
+        Purpose::Clone => ("model.path", &config.model.path),
+        Purpose::Design => ("model.design_path", &config.model.design_path),
+    };
+    if let Some(path) = explicit {
         let path = expand(path);
         if !path.exists() {
             bail!(
-                "model.path {} does not exist (explicit paths are never downloaded)",
+                "{key} {} does not exist (explicit paths are never downloaded)",
                 path.display()
             );
         }
         return Ok(path);
     }
     if config.engine.backend == spqx_core::synthesis::Backend::Tch {
-        bail!("legacy tch requires explicit model.path; automatic downloads support GGML and MLX");
+        bail!("legacy tch requires explicit {key}; automatic downloads support GGML and MLX");
     }
     let profiles = profiles()?;
     let profile = select_profile(&profiles, &config.model.id, config.engine.backend, purpose)?;
@@ -129,17 +134,31 @@ fn select_profile<'a>(
     backend: spqx_core::synthesis::Backend,
     purpose: Purpose,
 ) -> Result<Option<&'a Profile>> {
-    let Some(known) = profiles.iter().find(|profile| profile.repo == id) else {
-        return Ok(None); // Custom model IDs remain cache-only.
-    };
-    let backend = if backend == spqx_core::synthesis::Backend::Auto {
-        known.backend
-    } else {
-        backend
+    let known = profiles.iter().find(|profile| profile.repo == id);
+    if known.is_none() && purpose == Purpose::Clone {
+        return Ok(None); // Custom cloning model IDs remain cache-only.
+    }
+    // Auto follows a built-in configured model's engine, else this build's default.
+    let backend = match (backend, known) {
+        (spqx_core::synthesis::Backend::Auto, Some(known)) => known.backend,
+        (spqx_core::synthesis::Backend::Auto, None) => default_backend(),
+        (explicit, _) => explicit,
     };
     let profile = profiles.iter().find(|profile| profile.backend == backend && profile.purpose == purpose)
         .with_context(|| format!("no compatible pinned {purpose:?} profile for {backend:?}; this operation is not implemented for that engine (no Base model or backend fallback)"))?;
     Ok(Some(profile))
+}
+
+fn default_backend() -> spqx_core::synthesis::Backend {
+    if cfg!(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        feature = "mlx"
+    )) {
+        spqx_core::synthesis::Backend::Mlx
+    } else {
+        spqx_core::synthesis::Backend::Ggml
+    }
 }
 
 fn env_offline() -> bool {
