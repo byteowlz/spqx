@@ -20,7 +20,18 @@ Explicit `lab save` and `say --voice-id` retain the v2 context through the exist
 
 ## Speaker edits with fixed context
 
-Preview can combine `--icl prompt.json` with `--conditioning edited-vector.json`, or with `--space bank.json --base B --offsets=0.3,-0.2`. All scopes must match exactly. Only continuous speaker geometry changes; context code order/text/checksum stay intact. PCA banks are still fitted to speaker vectors, never flattened/interpolated discrete codec codes. This interface is implemented, but useful audible edits/retained accent after nonzero offsets need separate listening before the100-voice rating bank.
+Preview can combine `--icl prompt.json` with `--conditioning edited-vector.json`, or with `--space bank.json --base B --offsets=0.3,-0.2`. All scopes must match exactly. Only continuous speaker geometry changes; context code order/text/checksum stay intact. PCA banks are still fitted to speaker vectors, never flattened/interpolated discrete codec codes. This interface is implemented, but it is **not a demonstrated useful voice-morphing control**. Human results below show that fixed reference context dominates perceived speaker identity in the tested configuration; do not generate a100-voice speaker-PCA rating bank under that route.
+
+## Human control-authority result
+
+The user heard no useful voice changes from the four-source, two-axis ±0.75σ fixed-context PCA pilot (audio-drops `b949b68`). A stronger diagnostic then swapped entire native vectors from fictional source A (warm baritone) and B (bright mezzo), with identical model/text/top-k1 settings (`d7b88b4`):
+
+- Vector-only: user heard male then female, with no accents.
+- Fixed English full-ICL context: user heard the same woman and the same English accent in German.
+
+This supports **perceptual ICL dominance over speaker identity** for this0.6B Base Q8 test, not a universal model claim or proof that the vector is literally discarded. The pinned native prompt builder still inserts the supplied speaker vector into its prefix before adding the reference-code sequence. Exact inputs were verified; different output hashes are not evidence of useful identity control.
+
+Keep two capabilities separate: vector-only speaker/PCA calibration for editable timbre/identity, and frozen full-ICL reference cloning for faithful context/character reproduction. A calibrated semantic PCA bank and independent accent control are still unproven. Do not label an accent slider or silently convert one mode into the other;100 ratings cannot establish control over an input that has negligible audible authority in the chosen route.
 
 ## Closed first qualification
 
@@ -35,4 +46,4 @@ Preview can combine `--icl prompt.json` with `--conditioning edited-vector.json`
 
 Actual CUDA0.6B Base Q8 proof: complete context export/reload, original input path removed, fresh-process CLI replay, wrong-width rejection before PCM, pre/active cancellation, cap, malformed-input recovery and retained-session reuse passed. **Original-reference PCM, frozen-context API PCM and fresh CLI WAV were byte-identical** for the same German passage under top-k1 greedy selection. Reference has16 books ×76 frames. This is exact replay evidence for that fixture, not stochastic-output/engine parity or a semantic accent-control guarantee.
 
-Own3.35GiB/180s non-evicting lease released; guarded run9.414s, sampled owned peak3344MiB below3430MiB limit, CPU0/1. Sampling is not a continuous peak guarantee. No global canonical registration, model downloads, shared changes or neural training. Human listening to full-context replay and subsequent nonzero PCA edits remains separate.
+Own3.35GiB/180s non-evicting lease released; guarded run9.414s, sampled owned peak3344MiB below3430MiB limit, CPU0/1. Sampling is not a continuous peak guarantee. No global canonical registration, model downloads, shared changes or neural training. Human listening confirmed the frozen full-context replay retained exactly the same accent. Subsequent editing results are below.
