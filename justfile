@@ -10,6 +10,10 @@ check-portable:
 test-portable:
     cargo test --locked -p spqx-core -p spqx-cli --no-default-features --features qwentts --lib --bins --tests
 
+# Explicit VoiceDesign GGUF assets and fresh compute admission required; see docs/voice-design.md.
+test-native-design:
+    cargo test --locked -p spqx-core --no-default-features --features qwentts --test voice_design -- --ignored --nocapture
+
 test-native-cpu:
     cargo test --locked -p spqx-core --no-default-features --features qwentts --test native_cpu -- --ignored --nocapture
 

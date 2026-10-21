@@ -4,6 +4,7 @@
 
 - Automatically fetch missing revision/SHA256-pinned GGML or MLX model profiles on CLI first use; add `spqx models download`, offline controls and configurable cache selection. Serialize concurrent downloads and atomically commit only verified files. No hosted inference, voice downloads or weights embedded in runtime releases.
 - Compile CUDA candidate kernels for both SM86 (RTX3070) and SM89 (RTX4090). Verify the complete CUDA12 bundle on an RTX3070, including cold automatic model acquisition, English/German PCM, cancellation/fencing and recovery.
+- Add native description-to-new-voice generation through `synthesis::Session::load_voice_design` and `spqx design`, using the existing pinned GGML engine. Validate the loaded VoiceDesign checkpoint, omit all reference/preset conditioning, expose seed/recipe timing metadata and reject incomplete/silent candidates without overwriting saved WAVs. Actual Linux CUDA German synthesis and cancellation/cap/recovery passed; MLX/other-device VoiceDesign, framed-worker startup, Voice Lab integration and registry promotion remain separate. Replace the legacy VoiceDesign zero-PCM placeholder with an explicit unsupported error. See `docs/voice-design.md`.
 
 - Add a shared prepared synthesis session and a pinned GGML/libqwen whole-pipeline engine behind the CLI and existing worker protocol; keep MLX on Apple Silicon.
 - Add explicit engine/device/codec/runtime-library config and flags, fail closed for unavailable requested devices, and cache GGML reference conditioning across requests.

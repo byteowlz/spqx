@@ -165,7 +165,7 @@ fn report(
     }
 }
 
-fn resolve_out(config: &Config, out: &std::path::Path) -> PathBuf {
+pub(crate) fn resolve_out(config: &Config, out: &std::path::Path) -> PathBuf {
     if out.is_absolute() || out.components().count() > 1 {
         return out.to_path_buf();
     }

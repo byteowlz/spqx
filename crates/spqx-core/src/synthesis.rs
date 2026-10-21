@@ -140,7 +140,8 @@ pub fn ggml_device(device: &str) -> Result<Option<String>> {
     Ok(Some(value.to_owned()))
 }
 
-/// One loaded engine and checkpoint-scoped reference state.
+/// One loaded engine with checkpoint-scoped reference or description conditioning.
+/// A description session samples candidates; it does not establish a persistent voice identity.
 pub struct Session {
     kind: Backend,
     inner: Inner,
@@ -174,6 +175,28 @@ impl Session {
                 model, reference, transcript, language, options,
             )?),
             _ => bail!("engine is not compiled in"),
+        };
+        Ok(Self { kind, inner })
+    }
+    /// Load a VoiceDesign checkpoint once, without reference audio or a preset speaker.
+    /// Repeated synthesis reuses the model and description, not an enrolled identity.
+    /// Only the pinned GGML engine implements this operation; no backend/SDK fallback.
+    /// A seed is scoped to this engine/checkpoint, not portable voice conditioning.
+    pub fn load_voice_design(
+        model: &Path,
+        description: &str,
+        language: &str,
+        seed: Option<u64>,
+        options: &EngineOptions,
+    ) -> Result<Self> {
+        let seed = validate_design(description, language, seed)?;
+        let kind = select_backend(model, options.backend)?;
+        let inner = match kind {
+            #[cfg(feature = "qwentts")]
+            Backend::Ggml => Inner::Ggml(crate::ggml::Session::load_voice_design(
+                model, description, language, seed, options,
+            )?),
+            _ => bail!("VoiceDesign is not implemented for {kind:?}; use a VoiceDesign GGUF checkpoint with the pinned GGML runtime (no fallback)"),
         };
         Ok(Self { kind, inner })
     }
@@ -236,6 +259,20 @@ impl Session {
             }
         }
     }
+}
+
+fn validate_design(description: &str, language: &str, seed: Option<u64>) -> Result<i64> {
+    if description.trim().is_empty() || description.len() > 4096 || description.contains('\0') {
+        bail!("VoiceDesign description must be nonempty UTF-8, at most 4096 bytes, without NUL");
+    }
+    if language.trim().is_empty() || language.contains('\0') {
+        bail!("VoiceDesign language must be nonempty and without NUL");
+    }
+    Ok(seed
+        .map(i64::try_from)
+        .transpose()
+        .context("VoiceDesign seed exceeds i64 range")?
+        .unwrap_or(-1))
 }
 
 #[cfg(any(spqx_mlx, feature = "tch-backend"))]
@@ -308,6 +345,20 @@ mod tests {
         assert_eq!(Stop::CapReached.after_callback(false), Stop::Cancelled);
         assert_eq!(Stop::Eos.after_callback(true), Stop::Eos);
         assert_eq!(Stop::Cancelled.after_callback(true), Stop::Cancelled);
+    }
+    #[test]
+    fn design_validation_is_model_free_and_seed_is_not_silently_changed() {
+        assert_eq!(
+            validate_design("Adult fictional German voice", "german", Some(4242)).unwrap(),
+            4242
+        );
+        assert_eq!(validate_design("A voice", "auto", None).unwrap(), -1);
+        for description in ["", " \n", "bad\0instruction", &"x".repeat(4097)] {
+            assert!(validate_design(description, "german", None).is_err());
+        }
+        assert!(validate_design("A voice", "", None).is_err());
+        assert!(validate_design("A voice", "de\0", None).is_err());
+        assert!(validate_design("A voice", "german", Some(u64::MAX)).is_err());
     }
     #[test]
     fn devices_are_explicit() {

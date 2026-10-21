@@ -46,7 +46,7 @@ practical.
   [PiBot](https://github.com/badlogic/pibot)/[foxline](https://github.com/byteowlz/foxline)
   Python worker protocol and CLI. `pibot-tts-worker` remains as an
   upstream-name alias.
-- `spqx` — unified `say`, `serve`, voice registry and configuration CLI.
+- `spqx` — unified `say`, `design`, `serve`, voice registry and configuration CLI.
 - The following tensor-level diagnostics require `legacy-tools` plus `mlx` or
   `tch-backend`; portable users should use `spqx say`/`serve`:
 - `tts` — one-shot text-to-speech with preset voices.
@@ -70,6 +70,14 @@ just build-portable
 
 Published release bundles remain macOS-only for now. The historical timings
 above are MLX measurements, not cross-platform or audible-playback guarantees.
+
+### Prompt-designed voices
+
+`spqx design` creates a new described voice candidate without reference audio or a
+preset speaker. Configure an explicit VoiceDesign GGUF checkpoint; the automatic
+Base-cloning model profiles cannot perform this operation. Native GGML/CUDA is
+verified; MLX VoiceDesign remains explicitly unsupported. See
+[usage, model hashes and verification limits](docs/voice-design.md).
 
 ## Requirements (MLX)
 

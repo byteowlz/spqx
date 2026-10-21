@@ -70,6 +70,47 @@ fn engine_flags_override_config_and_json_stays_clean() {
     assert_eq!(value["model"]["offline"], true);
     assert_eq!(value["model"]["auto_download"], true);
 }
+#[test]
+fn design_and_model_download_commands_coexist_without_base_acquisition() {
+    let scratch = Scratch::new();
+    for args in [
+        vec!["design", "--help"],
+        vec!["models", "download", "--help"],
+    ] {
+        let output = scratch.command().args(args).output().unwrap();
+        assert!(output.status.success(), "{:?}", output);
+    }
+    let out = scratch.0.join("candidate.wav");
+    let cache = scratch.0.join("empty-cache");
+    let output = scratch
+        .command()
+        .env("SPQX_MODELS_DIR", &cache)
+        .args([
+            "--offline",
+            "--backend",
+            "ggml",
+            "--json",
+            "design",
+            "Synthetic text.",
+            "--instruct",
+            "A fictional adult German voice",
+            "--out",
+        ])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "{:?}", output);
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("VoiceDesign requires explicit model.path"),
+        "{:?}",
+        output
+    );
+    assert!(!cache.exists());
+    assert!(!out.exists());
+}
+
 #[cfg(feature = "qwentts")]
 #[test]
 fn startup_error_is_one_binary_frame_not_engine_chatter() {
