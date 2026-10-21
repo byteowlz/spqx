@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add blind manual voice-calibration ratings to the experimental Voice Lab: six traits, separate naturalness/flags/notes, exact audition bindings, explicit atomic saves, stale-tab protection and idempotent retries. Optional `rating_bank` config; existing native preview/save behavior and keyless Host/Origin policy retained. Private100-candidate vector-only bank technically verified; semantic controls, human acoustic acceptance and retro-console work remain unqualified. See `docs/voice-calibration.md`.
+
 - Add explicit native full-ICL freezing: speaker vector plus checksummed original reference codes/text, distinct from unchanged vector-only v1. `lab extract --full-icl` and `lab preview --icl` retain context without a source-WAV runtime dependency; optional same-scope speaker/PCA overrides leave context intact. Bundle v2/canonical consumption fail closed for incompatible or legacy readers. Exact native original/frozen/fresh-CLI replay and interruption/recovery tests passed for one greedy fixture; human accent/PCA qualification and live Lab integration remain separate. See `docs/frozen-icl.md` and ADR 0003.
 
 - Add engine/artifact-scoped frozen TTS conditioning and genuine centered-SVD PCA fitting with residual-preserving offsets. Keep exact audition WAV/text, effective vectors and reopenable PCA banks; fail on incompatible scope instead of normalizing, re-encoding or substituting engines. Add `spqx lab` extraction/fitting/preview/inspection/schema/explicit canonical-save operations and `say --voice-id` consumption through the existing voqx registry. Canonical saves are synthesis-only and retry-idempotent; existing named voices remain supported.

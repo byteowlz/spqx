@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, realpath, readdir } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { captureConditioning } from './frozen';
+import { RatingError, type RatingBank } from './ratings';
 
 export class LabError extends Error {
   constructor(public code: string, message: string, public status = 400) { super(message); }
@@ -44,7 +45,7 @@ async function atomic(path: string, value: unknown) {
 }
 export function createApp(options: {
   origin: string; data: string; info: any; publicDir: string;
-  media: Map<string,string>; allowedRoots: string[]; maxDaily: number; recipeFiles?: Record<string,string>;
+  media: Map<string,string>; allowedRoots: string[]; maxDaily: number; recipeFiles?: Record<string,string>; ratings?: RatingBank;
   render: (recipe: Recipe, id: string, admitted: () => Promise<void>) => Promise<Result>;
   promote?: (directory:string,name:string,operationId:string)=>Promise<string>;
 }) {
@@ -165,16 +166,18 @@ export function createApp(options: {
     if(!path && id.startsWith('draft-') && /^[a-f0-9-]{36}$/.test(id.slice(6))) {
       try{path=await realpath(join(options.data,'drafts',id.slice(6),'reference.wav'));}catch(error:any){if(error.code!=='ENOENT')throw error;}
     }
+    if(!path && id.startsWith('rating-') && options.ratings)path=await options.ratings.audio(id.slice(7));
     if(!path) return json({error:'not_found'},404);
     const resolved=await realpath(path);
     if(!allowedRoots.some(root=>resolved.startsWith(root+sep))) return json({error:'media_denied'},403);
     const file=Bun.file(resolved),size=file.size,range=req.headers.get('range');
-    if(!range)return new Response(file,{headers:{...headers,'Content-Type':'audio/wav','Accept-Ranges':'bytes'}});
+    const contentType=id.startsWith('rating-')?'audio/mp4':'audio/wav';
+    if(!range)return new Response(file,{headers:{...headers,'Content-Type':contentType,'Accept-Ranges':'bytes'}});
     const match=/^bytes=(\d+)-(\d*)$/.exec(range);
     if(!match)return new Response(null,{status:416,headers:{...headers,'Content-Range':`bytes */${size}`}});
     const start=Number(match[1]),end=Math.min(match[2]?Number(match[2]):size-1,size-1);
     if(start>end || start>=size)return new Response(null,{status:416,headers:{...headers,'Content-Range':`bytes */${size}`}});
-    return new Response(file.slice(start,end+1),{status:206,headers:{...headers,'Content-Type':'audio/wav','Content-Range':`bytes ${start}-${end}/${size}`,'Content-Length':String(end-start+1),'Accept-Ranges':'bytes'}});
+    return new Response(file.slice(start,end+1),{status:206,headers:{...headers,'Content-Type':contentType,'Content-Range':`bytes ${start}-${end}/${size}`,'Content-Length':String(end-start+1),'Accept-Ranges':'bytes'}});
   }
   return async function fetch(req: Request): Promise<Response> {
     try {
@@ -182,7 +185,13 @@ export function createApp(options: {
       if(req.headers.get('host')!==new URL(options.origin).host) return json({error:'host_denied'},421);
       const url=new URL(req.url),path=url.pathname;
       if(req.method==='GET' && path==='/health')return json({app:'spqx-voice-lab',status:'up',experimental:true});
-      if(req.method==='GET' && path==='/api/state')return json({...options.info,access:'trusted-tailnet',jobs:[...jobs.values()].sort((a,b)=>b.created.localeCompare(a.created)).slice(0,20),drafts:await draftList()});
+      if(req.method==='GET' && path==='/api/ratings')return options.ratings?json(await options.ratings.state()):json({error:'ratings_unavailable',message:'No audition bank is configured. Voice shaping is still available.'},503);
+      if(req.method==='POST' && /^\/api\/ratings\/c\d{3}$/.test(path)){
+        writeGuard(req);const value=await body(req);
+        if(!options.ratings)throw new LabError('ratings_unavailable','No audition bank is configured.',503);
+        return json(await options.ratings.save(path.split('/').pop()!,value),201);
+      }
+      if(req.method==='GET' && path==='/api/state')return json({...options.info,ratings_enabled:!!options.ratings,access:'trusted-tailnet',jobs:[...jobs.values()].sort((a,b)=>b.created.localeCompare(a.created)).slice(0,20),drafts:await draftList()});
       if(req.method==='POST' && path==='/api/preview') {
         writeGuard(req);const recipe=validateRecipe(await body(req),options.info.space);
         if(active)throw new LabError('preview_busy','One preview is already running. It will keep its original settings.',409);
@@ -199,9 +208,9 @@ export function createApp(options: {
         saving=true;try{return json(await (path==='/api/voices'?saveReusable(value):saveDraft(value)),201);}finally{saving=false;}
       }
       if(req.method==='GET' && /^\/media\/[a-zA-Z0-9-]+$/.test(path))return await media(req,path.slice(7));
-      const staticFiles:Record<string,string>={'/':'index.html','/index.html':'index.html','/app.js':'app.js','/styles.css':'styles.css','/tokens.css':'tokens.css','/fixture.json':'fixture.json'};
+      const staticFiles:Record<string,string>={'/':'index.html','/index.html':'index.html','/app.js':'app.js','/styles.css':'styles.css','/tokens.css':'tokens.css','/fixture.json':'fixture.json','/ratings':'ratings.html','/ratings.html':'ratings.html','/ratings.js':'ratings.js','/ratings.css':'ratings.css','/rating-fixture.json':'rating-fixture.json'};
       if(req.method==='GET' && staticFiles[path])return new Response(Bun.file(join(options.publicDir,staticFiles[path])),{headers});
       return json({error:'not_found'},404);
-    } catch(error) {return json({error:error instanceof LabError?error.code:'internal_error',message:error instanceof LabError?error.message:'The request failed safely.'},error instanceof LabError?error.status:500);}
+    } catch(error) {const known=error instanceof LabError||error instanceof RatingError;return json({error:known?error.code:'internal_error',message:known?error.message:'The request failed safely.'},known?error.status:500);}
   };
 }

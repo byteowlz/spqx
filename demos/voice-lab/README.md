@@ -24,7 +24,7 @@ bun server.ts --provider experimental-sdk --profile /private/sdk-pca-probe \
   --python /private/sdk-venv/bin/python --enable-preview
 ```
 
-Configuration: CLI > explicit `--config` > `VOICE_LAB_*` environment > local `config.toml` > global XDG `spqx-voice-lab/config.toml`. First run creates default config and `schema.json`. Environment fields include `HOST`, `PORT`, `PROFILE`, `PYTHON`, `PROVIDER`, `NATIVE_CLI`, `NATIVE_CONFIG`, `NATIVE_REGISTRY`. Default listener is loopback, previews disabled; tailnet publication needs an explicit bind. Data defaults to the XDG data directory with private filesystem permissions.
+Configuration: CLI > explicit `--config` > `VOICE_LAB_*` environment > local `config.toml` > global XDG `spqx-voice-lab/config.toml`. First run creates default config and `schema.json`. Environment fields include `HOST`, `PORT`, `PROFILE`, `PYTHON`, `PROVIDER`, `NATIVE_CLI`, `NATIVE_CONFIG`, `NATIVE_REGISTRY`, `RATING_BANK`. Default listener is loopback, previews disabled; tailnet publication needs an explicit bind. Data defaults to the XDG data directory with private filesystem permissions.
 
 The user explicitly chose keyless trusted-tailnet access: anyone reaching this listener can read drafts/media and request bounded previews; native mode also exposes explicit synthesis-only canonical Save. No login, pairing, bearer or recognition/session/tool authority is implied. This is not a general internet-public mode or another app's auth policy. Exact Host/Origin checks remain. No private/real-person upload endpoint.
 
@@ -47,10 +47,16 @@ GET `/health` and `/api/state` need no credentials. Every write requires the exa
 - POST `/api/voices`: same body → exact draft plus explicit canonical save, native provider only. Failure retains the draft; retry the same intent instead of generating again.
 - GET `/media/<allowlisted-id>` → byte-range audio. `/api/unlock` is retired.
 
+## Manual voice calibration
+
+Set `rating_bank = "/private/voice-bank"` (or `--rating-bank`) and open `/ratings` for blind six-trait ratings plus separate naturalness, exclusion and notes. Save explicitly; no generation, machine labels, training or registry promotion. `GET /api/ratings` and `POST /api/ratings/cNNN` share the versioned files, exact-audio bindings, revision checks and retry ids. Source prompts are not exposed. See [calibration contract](../../docs/voice-calibration.md) and [request schema](rating-request.schema.json).
+
 ## Proof and visual status
 
-`just test` runs18 tests/85 assertions including effective-vector custody, lossless native numeric documents, explicit canonical save/retry, media protections, single-flight and incompatible provider/admission failures. `just check` builds the Bun server.
+`just test` runs 27 tests/135 assertions including effective-vector custody, lossless native numeric documents, explicit canonical save/retry, media protections, single-flight and incompatible provider/admission failures. `just check` builds the Bun server.
 
 `VOICE_LAB_URL=http://127.0.0.1:8805 just frozen-browser-check` intentionally requires a fresh isolated native test service/registry. It performs one admitted real render, keyboard PCA edits, an in-flight change, browser decode/playback-clock checks, exact canonical save/retry/reopen, Range206 and Origin denial. Do not run it against user data. `scripts/capture.ts` captures only read-only synthetic visual fixtures.
 
-r3 preserves the existing r2 anatomy/tokens. Studio line `spqx-voice-lab` has no selected production target; these remain exploratory proposals and Web evidence. Native CUDA execution, synthetic screenshots, headless audio-clock advancement, physical-phone behavior and human listening are distinct evidence. Prototype controller/quota/shutdown hardening remains tracked separately; no blanket release/security approval.
+`just ratings-browser-check` starts its own isolated loopback8805 service with synthetic non-speech audio. It tests explicit rating saves/reload, lost acknowledgements, stale tabs, keyboard edits, ranges and phone widths without inference or real labels.
+
+r4 extends the existing r3 look with manual ratings; no retro-console redesign. r3 preserves the existing r2 anatomy/tokens. Studio line `spqx-voice-lab` has no selected production target; these remain exploratory proposals and Web evidence. Native CUDA execution, synthetic screenshots, headless audio-clock advancement, physical-phone behavior and human listening are distinct evidence. Prototype controller/quota/shutdown hardening remains tracked separately; no blanket release/security approval.

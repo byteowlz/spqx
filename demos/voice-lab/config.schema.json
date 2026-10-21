@@ -22,6 +22,7 @@
     "native_cli": {"type":"string","description":"Trusted native spqx executable with frozen/PCA operations. Current live native provider is Linux GGML/CUDA."},
     "native_config": {"type":"string","description":"Explicit spqx config selecting pinned Base GGUF/codec/runtime/device."},
     "native_registry": {"type":"string","description":"Canonical voqx registry root override; otherwise native CLI uses XDG voice-registry."},
+    "rating_bank": {"type":"string","description":"Private version1 vector-only audition bank. Enables manual ratings, not synthesis or canonical saving."},
     "python": {
       "type": "string",
       "description": "Existing SDK environment Python, invoked via uv."

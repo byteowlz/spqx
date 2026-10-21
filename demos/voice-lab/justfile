@@ -13,6 +13,10 @@ open:
 browser-check:
     bun scripts/browser-check.ts
 
+# Fresh synthetic audio/state only; no inference or real corpus ratings.
+ratings-browser-check:
+    bun scripts/ratings-browser-check.ts
+
 # Fresh isolated native fixture/registry only; spends one admitted preview.
 frozen-browser-check:
     bun scripts/frozen-browser-check.ts

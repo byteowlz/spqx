@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "bank": "synthetic-review",
+  "text": "Hallo, schön, dass du da bist. Für zwölf Euro gibt es frischen Kaffee und Käsekuchen. Morgen fahren wir nach München.",
+  "target_count": 2,
+  "generation_status": "complete",
+  "traits": [
+    {
+      "id": "pitch",
+      "label": "Pitch",
+      "low": "Low",
+      "high": "High"
+    },
+    {
+      "id": "brightness",
+      "label": "Brightness",
+      "low": "Dark",
+      "high": "Bright"
+    },
+    {
+      "id": "breathiness",
+      "label": "Breathiness",
+      "low": "Clear",
+      "high": "Airy"
+    },
+    {
+      "id": "roughness",
+      "label": "Roughness",
+      "low": "Smooth",
+      "high": "Raspy"
+    },
+    {
+      "id": "weight",
+      "label": "Vocal weight",
+      "low": "Light / thin",
+      "high": "Full / heavy"
+    },
+    {
+      "id": "nasality",
+      "label": "Nasality",
+      "low": "Open / oral",
+      "high": "Nasal"
+    }
+  ],
+  "candidates": [
+    {
+      "id": "c001",
+      "seconds": 7.28,
+      "audio_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "media": "",
+      "rating": null
+    },
+    {
+      "id": "c002",
+      "seconds": 6.8,
+      "audio_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "media": "",
+      "rating": null
+    }
+  ],
+  "rated": 0
+}

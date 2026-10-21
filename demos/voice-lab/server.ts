@@ -6,9 +6,10 @@ import { parseArgs } from 'node:util';
 import { isIP } from 'node:net';
 import { createApp, LabError, type Recipe } from './core';
 import { NativeRenderer } from './native-renderer';
+import { RatingBank } from './ratings';
 
 const here=import.meta.dir;
-const args=parseArgs({args:Bun.argv.slice(2),options:{config:{type:'string'},host:{type:'string'},port:{type:'string'},profile:{type:'string'},python:{type:'string'},data:{type:'string'},provider:{type:'string'},'native-cli':{type:'string'},'native-config':{type:'string'},'native-registry':{type:'string'},'enable-preview':{type:'boolean'}}}).values;
+const args=parseArgs({args:Bun.argv.slice(2),options:{config:{type:'string'},host:{type:'string'},port:{type:'string'},profile:{type:'string'},python:{type:'string'},data:{type:'string'},provider:{type:'string'},'native-cli':{type:'string'},'native-config':{type:'string'},'native-registry':{type:'string'},'rating-bank':{type:'string'},'enable-preview':{type:'boolean'}}}).values;
 const configRoot=join(process.env.XDG_CONFIG_HOME||join(homedir(),'.config'),'spqx-voice-lab');
 await mkdir(configRoot,{recursive:true,mode:0o700});
 const defaultFile=join(configRoot,'config.toml');
@@ -17,7 +18,7 @@ await writeFile(join(configRoot,'schema.json'),await readFile(join(here,'config.
 const globalConfig=Bun.TOML.parse(await readFile(defaultFile,'utf8')) as any;
 let local:any={};try{local=Bun.TOML.parse(await readFile(join(process.cwd(),'config.toml'),'utf8'));}catch{}
 let explicit:any={};if(args.config)explicit=Bun.TOML.parse(await readFile(args.config,'utf8'));
-const cfg={...globalConfig,...local,...Object.fromEntries(Object.entries({host:process.env.VOICE_LAB_HOST,port:process.env.VOICE_LAB_PORT,profile:process.env.VOICE_LAB_PROFILE,python:process.env.VOICE_LAB_PYTHON,provider:process.env.VOICE_LAB_PROVIDER,native_cli:process.env.VOICE_LAB_NATIVE_CLI,native_config:process.env.VOICE_LAB_NATIVE_CONFIG,native_registry:process.env.VOICE_LAB_NATIVE_REGISTRY}).filter(([,v])=>v!==undefined)),...explicit,...Object.fromEntries(Object.entries(args).filter(([,v])=>v!==undefined).map(([k,v])=>[k.replaceAll('-','_'),v]))};
+const cfg={...globalConfig,...local,...Object.fromEntries(Object.entries({host:process.env.VOICE_LAB_HOST,port:process.env.VOICE_LAB_PORT,profile:process.env.VOICE_LAB_PROFILE,python:process.env.VOICE_LAB_PYTHON,provider:process.env.VOICE_LAB_PROVIDER,native_cli:process.env.VOICE_LAB_NATIVE_CLI,native_config:process.env.VOICE_LAB_NATIVE_CONFIG,native_registry:process.env.VOICE_LAB_NATIVE_REGISTRY,rating_bank:process.env.VOICE_LAB_RATING_BANK}).filter(([,v])=>v!==undefined)),...explicit,...Object.fromEntries(Object.entries(args).filter(([,v])=>v!==undefined).map(([k,v])=>[k.replaceAll('-','_'),v]))};
 if(args['enable-preview'])cfg.preview=true;
 const host=String(cfg.host),port=Number(cfg.port),profile=resolve(String(cfg.profile||'.'));
 const provider=String(cfg.provider||'experimental-sdk'),native=provider==='native-spqx';
@@ -75,7 +76,10 @@ async function render(recipe:Recipe,id:string,admitted:()=>Promise<void>){
  }finally{const receipt=await command([dpty,'loadout','release',lease]);await writeFile(join(data,'jobs',id+'-release.txt'),receipt,{mode:0o600});if(!/released 1 reservation/.test(receipt))throw new LabError('lease_cleanup_unconfirmed','Preview ended but resource cleanup needs operator inspection.',503);}
 }
 const origin=`http://${host}:${port}`;
-const handler=createApp({origin,data,info,publicDir:join(here,'public'),media,allowedRoots:[profile,sourceRoot,data],maxDaily:Number(cfg.max_daily),render,promote:native?promote:undefined,recipeFiles:{'basis.npz':join(profile,'basis.npz'),'conditioning.safetensors':join(profile,'conditioning.safetensors')}});
+const ratingRoot=cfg.rating_bank?resolve(String(cfg.rating_bank)):undefined;
+const ratings=ratingRoot?new RatingBank(ratingRoot):undefined;
+if(ratings)await ratings.state(); // Invalid configured banks fail startup; no silent substitute.
+const handler=createApp({origin,data,info,publicDir:join(here,'public'),media,ratings,allowedRoots:[profile,sourceRoot,data,...(ratingRoot?[ratingRoot]:[])],maxDaily:Number(cfg.max_daily),render,promote:native?promote:undefined,recipeFiles:{'basis.npz':join(profile,'basis.npz'),'conditioning.safetensors':join(profile,'conditioning.safetensors')}});
 const server=Bun.serve({hostname:host,port,maxRequestBodySize:4096,fetch:handler});
 console.log(`Voice Lab: ${origin} (experimental; trusted-tailnet access, no key)`);
 for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,async()=>{server.stop();nativeRenderer?.stop();if(activeChild?.pid){try{process.kill(-activeChild.pid,'SIGTERM');}catch{}}await unlink(lockPath).catch(()=>{});setTimeout(()=>process.exit(0),12000);});

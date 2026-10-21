@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Explicit voice audition rating request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "bank",
+    "audio_sha256",
+    "operation_id",
+    "expected_revision",
+    "scores",
+    "naturalness",
+    "excluded",
+    "pronunciation_issue",
+    "notes"
+  ],
+  "properties": {
+    "bank": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "audio_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "operation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "expected_revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "scores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pitch",
+        "brightness",
+        "breathiness",
+        "roughness",
+        "weight",
+        "nasality"
+      ],
+      "properties": {
+        "pitch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "brightness": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "breathiness": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "roughness": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "weight": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "nasality": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "naturalness": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "excluded": {
+      "type": "boolean"
+    },
+    "pronunciation_issue": {
+      "type": "boolean"
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 600
+    }
+  }
+}
