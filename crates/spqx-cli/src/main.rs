@@ -130,8 +130,11 @@ enum Command {
 
 #[derive(Debug, Clone, Copy, Subcommand)]
 enum ModelsCommand {
-    /// Download/verify the configured model explicitly. Still honors --offline.
-    Download,
+    /// Download/verify the operation-compatible model explicitly. Still honors --offline.
+    Download {
+        #[arg(long, value_enum, default_value = "clone")]
+        purpose: models::Purpose,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Subcommand)]
@@ -155,11 +158,11 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Say(args) => say::run(args, &cli.common),
         Command::Models {
-            command: ModelsCommand::Download,
+            command: ModelsCommand::Download { purpose },
         } => {
             let mut config = cli.common.load_config()?;
             config.model.auto_download = true;
-            let path = models::resolve(&config)?;
+            let path = models::resolve_for(&config, purpose)?;
             if cli.common.json {
                 println!("{}", serde_json::json!({"path":path}));
             } else {

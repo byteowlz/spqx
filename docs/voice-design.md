@@ -4,7 +4,9 @@
 
 ## Use
 
-Select an actual VoiceDesign talker GGUF file, its 12 Hz codec and the pinned runtime described in [portable engines](portable-engines.md). VoiceDesign currently requires an explicit local `model.path`; the automatically acquired Base-cloning profiles are not VoiceDesign checkpoints. Missing explicit selection fails before cache acquisition or model downloads. Ordinary `say`/`serve` retain automatic pinned Base model downloads.
+Use the pinned runtime described in [portable engines](portable-engines.md). With `--backend ggml` and no explicit `model.path`, `design` automatically acquires the pinned 1.7B VoiceDesign Q8 talker and F32 codec below—not the Base-cloning weights. Explicit paths remain local and are never replaced. Offline/auto-download controls apply as usual. MLX VoiceDesign remains unavailable; it never silently selects GGML or downloads an incompatible Base model.
+
+Prefetch without synthesis using `spqx --backend ggml models download --purpose design`; the default `models download` purpose remains `clone` for ordinary `say`/`serve`.
 
 ```sh
 spqx --backend ggml --device cuda:0 --config config.toml --json design \
@@ -13,7 +15,7 @@ spqx --backend ggml --device cuda:0 --config config.toml --json design \
   --language german --seed 4242 --out candidate.wav > candidate.json
 ```
 
-Set `model.path` to the explicit VoiceDesign GGUF file, `engine.library` to the matching native library and `engine.codec` to the codec GGUF. Output is native 24 kHz mono PCM16 WAV; other configured sample rates are rejected rather than silently resampling candidates. No denoising, trimming or regeneration is performed. Existing output files are not overwritten, including files created while inference is running. No live playback is started.
+For custom/local assets, set `model.path` to the VoiceDesign GGUF file and `engine.codec` to its codec. Set `engine.library` only when not using the matching bundled runtime. Output is native 24 kHz mono PCM16 WAV; other configured sample rates are rejected rather than silently resampling candidates. No denoising, trimming or regeneration is performed. Existing output files are not overwritten, including files created while inference is running. No live playback is started.
 
 The JSON records the description, spoken text, language, seed, model path, selected backend and timing boundaries. Keep the exact WAV with this recipe and independently recorded model/runtime hashes. A seed is not a portable voice identity or a guarantee across engines/devices. Saving a candidate does not promote a registry voice or enroll recognition.
 

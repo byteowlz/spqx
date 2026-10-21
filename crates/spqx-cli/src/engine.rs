@@ -124,13 +124,10 @@ pub fn design_streaming(
     seed: Option<u64>,
     text: &str,
     on_chunk: impl FnMut(&[f32]) + Send,
-) -> Result<(SynthStats, f64)> {
-    if config.model.path.is_none() {
-        bail!("VoiceDesign requires explicit model.path pointing to a VoiceDesign GGUF checkpoint; automatic model profiles are Base cloning models");
-    }
+) -> Result<(SynthStats, f64, PathBuf)> {
     let _stdout_guard = spqx_core::stdio::StdoutGuard::new()?;
     let started = std::time::Instant::now();
-    let model = resolve_model_dir(config)?;
+    let model = crate::models::resolve_for(config, crate::models::Purpose::Design)?;
     let session = Session::load_voice_design(
         &model,
         description,
@@ -142,6 +139,7 @@ pub fn design_streaming(
     Ok((
         stream_session(config, &session, text, false, on_chunk)?,
         prepare_s,
+        model,
     ))
 }
 

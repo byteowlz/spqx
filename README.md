@@ -74,8 +74,9 @@ above are MLX measurements, not cross-platform or audible-playback guarantees.
 ### Prompt-designed voices
 
 `spqx design` creates a new described voice candidate without reference audio or a
-preset speaker. Configure an explicit VoiceDesign GGUF checkpoint; the automatic
-Base-cloning model profiles cannot perform this operation. Native GGML/CUDA is
+preset speaker. With `--backend ggml`, its pinned VoiceDesign checkpoint and codec
+are downloaded automatically unless offline or an explicit local path is configured.
+Prefetch with `spqx --backend ggml models download --purpose design`. Native GGML/CUDA is
 verified; MLX VoiceDesign remains explicitly unsupported. See
 [usage, model hashes and verification limits](docs/voice-design.md).
 

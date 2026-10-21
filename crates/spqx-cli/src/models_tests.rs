@@ -4,6 +4,9 @@ use std::{net::TcpListener, sync::Arc, thread};
 
 fn profile(body: &[u8]) -> Profile {
     Profile {
+        purpose: Purpose::Clone,
+        backend: spqx_core::synthesis::Backend::Ggml,
+        entrypoint: None,
         repo: "test/model".into(),
         revision: "1111111111111111111111111111111111111111".into(),
         files: vec![Asset {
@@ -118,7 +121,33 @@ fn offline_missing_cache_does_not_create_state_or_contact_server() {
 #[test]
 fn catalog_is_pinned_and_paths_are_confined() {
     let catalog = profiles().unwrap();
-    assert_eq!(catalog.len(), 2);
+    assert_eq!(catalog.len(), 3);
+    use spqx_core::synthesis::Backend;
+    let base_id = &catalog[0].repo;
+    let design = select_profile(&catalog, base_id, Backend::Ggml, Purpose::Design)
+        .unwrap()
+        .unwrap();
+    assert!(design
+        .files
+        .iter()
+        .any(|asset| asset.path == "qwen-talker-1.7b-voicedesign-Q8_0.gguf"));
+    assert!(!design
+        .files
+        .iter()
+        .any(|asset| asset.path.contains("base-")));
+    assert_eq!(
+        select_profile(&catalog, base_id, Backend::Ggml, Purpose::Clone)
+            .unwrap()
+            .unwrap()
+            .purpose,
+        Purpose::Clone
+    );
+    assert!(select_profile(&catalog, base_id, Backend::Mlx, Purpose::Design).is_err());
+    assert!(
+        select_profile(&catalog, "custom/model", Backend::Ggml, Purpose::Design)
+            .unwrap()
+            .is_none()
+    );
     for p in catalog {
         assert_eq!(p.revision.len(), 40);
         for asset in p.files {

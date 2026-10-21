@@ -41,7 +41,7 @@ pub fn run(args: DesignArgs, common: &CommonOpts) -> Result<()> {
     }
     let started = std::time::Instant::now();
     let mut samples = Vec::new();
-    let (stats, prepare_s) =
+    let (stats, prepare_s, model) =
         engine::design_streaming(&config, &args.instruct, args.seed, &args.text, |chunk| {
             samples.extend_from_slice(chunk)
         })?;
@@ -63,7 +63,7 @@ pub fn run(args: DesignArgs, common: &CommonOpts) -> Result<()> {
             "{}",
             serde_json::json!({
                 "operation": "voice_design", "backend": stats.backend,
-                "model": engine::resolve_model_dir(&config)?,
+                "model": model,
                 "text": args.text, "description": args.instruct,
                 "language": spqx_core::worker::normalize_language(&config.voice.language),
                 "seed": args.seed, "sample_rate": stats.sample_rate,

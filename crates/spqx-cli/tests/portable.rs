@@ -102,8 +102,7 @@ fn design_and_model_download_commands_coexist_without_base_acquisition() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty(), "{:?}", output);
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("VoiceDesign requires explicit model.path"),
+        String::from_utf8_lossy(&output.stderr).contains("qwen-talker-1.7b-voicedesign-Q8_0.gguf"),
         "{:?}",
         output
     );

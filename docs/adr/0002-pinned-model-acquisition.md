@@ -14,6 +14,10 @@ Explicit local paths are never repaired or replaced. Custom model IDs remain cac
 
 A per-repository OS file lock serializes consumers. Files stream into same-directory temporary files, are size/hash checked, fsynced and atomically committed. Interrupted/corrupt transfers cannot become usable model files; subsequent attempts retain valid completed files. An intact cached snapshot works offline. Existing supported snapshots are integrity-checked before use, so cache verification is startup work, not streaming TTFA.
 
+## Operation-compatible profiles
+
+Profiles carry a synthesis purpose (`clone` or `design`) and engine. `say`/`serve` and the default `models download` select Base-cloning assets. `design` and `models download --purpose design` select the pinned 1.7B VoiceDesign Q8 talker plus F32 codec on GGML. A GGML design profile resolves to its exact talker entrypoint, even when Base weights share the same repository snapshot. Explicit model paths and custom cache-only IDs retain their existing ownership rules. Unsupported engine/operation pairs fail before downloading incompatible weights or choosing another backend. MLX VoiceDesign is not yet supported by this extension.
+
 ## Proof
 
 Synthetic loopback tests cover exact pinned URLs, cache-only reuse, corruption, truncated/wrong-content responses, concurrent consumers, confined paths, explicit-path preservation and zero-network offline failure. Live prefetch and native synthesis are separate opt-in checks. CLI JSON and binary stdout remain reserved for results/protocol; download progress goes to stderr.

@@ -20,8 +20,20 @@ struct Asset {
     bytes: u64,
     sha256: String,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Purpose {
+    #[default]
+    Clone,
+    Design,
+}
+
 #[derive(Debug, Deserialize)]
 struct Profile {
+    purpose: Purpose,
+    backend: spqx_core::synthesis::Backend,
+    #[serde(default)]
+    entrypoint: Option<String>,
     repo: String,
     revision: String,
     files: Vec<Asset>,
@@ -52,6 +64,10 @@ pub fn cache_root(config: &Config) -> Result<PathBuf> {
 }
 
 pub fn resolve(config: &Config) -> Result<PathBuf> {
+    resolve_for(config, Purpose::Clone)
+}
+
+pub fn resolve_for(config: &Config, purpose: Purpose) -> Result<PathBuf> {
     if let Some(path) = &config.model.path {
         let path = expand(path);
         if !path.exists() {
@@ -66,19 +82,10 @@ pub fn resolve(config: &Config) -> Result<PathBuf> {
         bail!("legacy tch requires explicit model.path; automatic downloads support GGML and MLX");
     }
     let profiles = profiles()?;
-    let mut id = config.model.id.as_str();
-    // An explicit engine selects its compatible built-in profile. Custom IDs
-    // remain cache-only, rather than silently fetching a different checkpoint.
-    if profiles.iter().any(|p| p.repo == id) {
-        match config.engine.backend {
-            spqx_core::synthesis::Backend::Ggml => id = &profiles[1].repo,
-            spqx_core::synthesis::Backend::Mlx => id = &profiles[0].repo,
-            _ => (),
-        }
-    }
+    let profile = select_profile(&profiles, &config.model.id, config.engine.backend, purpose)?;
     let cache = cache_root(config)?;
-    if let Some(profile) = profiles.iter().find(|p| p.repo == id) {
-        if profile.repo.starts_with("mlx-community/")
+    if let Some(profile) = profile {
+        if profile.backend == spqx_core::synthesis::Backend::Mlx
             && !cfg!(all(
                 target_os = "macos",
                 target_arch = "aarch64",
@@ -93,15 +100,46 @@ pub fn resolve(config: &Config) -> Result<PathBuf> {
             .timeout_connect(Duration::from_secs(20))
             .timeout_read(Duration::from_secs(90))
             .build();
-        return acquire(
+        let snapshot = acquire(
             profile,
             &cache,
             offline || !config.model.auto_download,
             &agent,
             "https://huggingface.co",
-        );
+        )?;
+        return match &profile.entrypoint {
+            Some(name) => {
+                let asset = profile
+                    .files
+                    .iter()
+                    .find(|asset| &asset.path == name)
+                    .context("model entrypoint is not a pinned asset")?;
+                asset_path(&snapshot, asset)
+            }
+            None => Ok(snapshot),
+        };
     }
+    let id = &config.model.id;
     custom_snapshot(&cache, id).with_context(|| format!("no cached model {id}; automatic downloads support only the pinned built-in profiles; set model.path for custom models"))
+}
+
+fn select_profile<'a>(
+    profiles: &'a [Profile],
+    id: &str,
+    backend: spqx_core::synthesis::Backend,
+    purpose: Purpose,
+) -> Result<Option<&'a Profile>> {
+    let Some(known) = profiles.iter().find(|profile| profile.repo == id) else {
+        return Ok(None); // Custom model IDs remain cache-only.
+    };
+    let backend = if backend == spqx_core::synthesis::Backend::Auto {
+        known.backend
+    } else {
+        backend
+    };
+    let profile = profiles.iter().find(|profile| profile.backend == backend && profile.purpose == purpose)
+        .with_context(|| format!("no compatible pinned {purpose:?} profile for {backend:?}; this operation is not implemented for that engine (no Base model or backend fallback)"))?;
+    Ok(Some(profile))
 }
 
 fn env_offline() -> bool {
@@ -179,7 +217,7 @@ fn acquire(
         return Ok(snapshot);
     }
     if offline {
-        bail!("model {}@{} is missing or corrupt in {}; offline/auto_download=false prevents downloads",profile.repo,profile.revision,cache.display());
+        bail!("model {}@{} ({:?}/{:?}, {}) is missing or corrupt in {}; offline/auto_download=false prevents downloads", profile.repo, profile.revision, profile.backend, profile.purpose, profile.entrypoint.as_deref().unwrap_or("snapshot"), cache.display());
     }
     fs::create_dir_all(&repo)?;
     let lock = OpenOptions::new()

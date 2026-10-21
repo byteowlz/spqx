@@ -1,5 +1,7 @@
 [
   {
+    "purpose": "clone",
+    "backend": "mlx",
     "repo": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
     "revision": "4e44ed4bcee28a0f89a493e07bde16e6dccd43eb",
     "files": [
@@ -71,6 +73,8 @@
     ]
   },
   {
+    "purpose": "clone",
+    "backend": "ggml",
     "repo": "Serveurperso/Qwen3-TTS-GGUF",
     "revision": "b7ee2e8c7459c3bea99da23e3d178125a7d1713c",
     "files": [
@@ -78,6 +82,25 @@
         "path": "qwen-talker-0.6b-base-Q8_0.gguf",
         "bytes": 992615488,
         "sha256": "d54dbaf10591421fa764ed630d764efa717ae40cd959bd48c66d4eb1af226426"
+      },
+      {
+        "path": "qwen-tokenizer-12hz-F32.gguf",
+        "bytes": 647263104,
+        "sha256": "b16b95557c7c7340a121757bd6855b9609e1cf4ad3fad0778b89393293ae5f3d"
+      }
+    ]
+  },
+  {
+    "purpose": "design",
+    "backend": "ggml",
+    "entrypoint": "qwen-talker-1.7b-voicedesign-Q8_0.gguf",
+    "repo": "Serveurperso/Qwen3-TTS-GGUF",
+    "revision": "b7ee2e8c7459c3bea99da23e3d178125a7d1713c",
+    "files": [
+      {
+        "path": "qwen-talker-1.7b-voicedesign-Q8_0.gguf",
+        "bytes": 2042833824,
+        "sha256": "575610ab1ddcca4dca6bd9a64bcd859d93bbad8764f9cab24e1dbc0c51f62276"
       },
       {
         "path": "qwen-tokenizer-12hz-F32.gguf",
