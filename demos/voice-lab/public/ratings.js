@@ -37,7 +37,7 @@ async function load(){
  if(busy)return;
  if(drafts.size&&!confirm('Reloading discards your unsaved slider changes. Continue?'))return;
  try{
-  const previous=current()?.id;state=await api(fixture?'/rating-fixture.json':'/api/ratings');drafts.clear();pending=null;
+  const previous=current()?.id;state=await api(fixture?new URL('./rating-fixture.json',location.href).pathname:'/api/ratings');drafts.clear();pending=null;
   $('trait-sliders').replaceChildren(...state.traits.map(slider));selectOptions();
   const available=state.candidates.length>0;$('rating-workbench').hidden=!available;$('empty').hidden=available;progress();
   if(available){let next=state.candidates.findIndex(c=>c.id===previous);if(next<0)next=state.candidates.findIndex(c=>!c.rating);display(next<0?0:next);}
