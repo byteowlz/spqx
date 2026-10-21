@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en" data-scheme="oqto-light">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Voice Lab</title><link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="styles.css"><script src="app.js" defer></script></head>
+<body>
+<header class="top"><a class="wordmark" href="./">Voice Lab<span class="mark" aria-hidden="true"></span></a><span id="mode" class="muted">Experimental PCA space</span><a class="quiet" href="/ratings">Rate voices</a></header>
+<main>
+<div class="intro"><div><h1>Dial in a voice.</h1><p>Make a change. Hear it. Keep what you like.</p></div><div class="space-meta"><strong>Two real PCA axes</strong><span>Three source voices · German · 0.6B Base</span></div></div>
+<p id="notice" role="status" aria-live="polite" hidden></p>
+<div class="workbench">
+<section class="controls" aria-labelledby="shape-title">
+<div class="section-heading"><h2 id="shape-title">Shape</h2><button id="reset" class="quiet">Reset</button></div>
+<fieldset class="sources"><legend>Start from</legend><label><input type="radio" name="base" value="A" checked><span>Voice A</span></label><label><input type="radio" name="base" value="C"><span>Voice C</span></label><label><input type="radio" name="base" value="D"><span>Voice D</span></label></fieldset>
+<p id="source-note" class="small muted"></p><p class="small muted">Offsets from the selected source, in fitted standard deviations.</p>
+<div class="axis"><div class="inline"><label for="pc1">PC1</label><output for="pc1" id="pc1-value">+0.00 σ</output></div><input id="pc1" type="range" min="-0.75" max="0.75" step="0.05" value="0"><div class="scale"><span>−0.75</span><span>0</span><span>+0.75</span></div></div>
+<div class="axis"><div class="inline"><label for="pc2">PC2</label><output for="pc2" id="pc2-value">+0.00 σ</output></div><input id="pc2" type="range" min="-0.75" max="0.75" step="0.05" value="0"><div class="scale"><span>−0.75</span><span>0</span><span>+0.75</span></div></div>
+<button id="preview" class="primary">Preview voice</button><p id="preview-status" class="small muted">Sliders never start a render on their own.</p>
+<svg id="space" viewBox="0 0 320 190" role="img" aria-label="Measured source-voice coordinates and current PCA position"><path class="grid" d="M24 95H296M160 20V170"></path><g id="points"></g><circle id="cursor" r="6"></circle><text x="278" y="111">PC1</text><text x="169" y="29">PC2</text></svg>
+<details class="small muted"><summary>About this space</summary><p>Three voices, two fitted directions—not calibrated pitch or age controls. Some settings extend beyond the source samples.</p></details>
+</section>
+<section class="audition" aria-labelledby="listen-title">
+<div class="section-heading"><h2 id="listen-title">Listen</h2><span id="dirty" class="tag">Unchanged</span></div>
+<div class="readout"><span class="small muted">Same words. Same seed.</span><p id="readout">Die Spracherkennung läuft direkt auf deinem Gerät. Wenn du möchtest, wechseln wir jetzt die Stimme. Sag einfach Bescheid, sobald du bereit bist.</p></div>
+<div class="take"><div class="section-heading"><div><h3>Current preview</h3><p id="rendered-settings" class="small muted">Voice A · PC1 +0.00 · PC2 +0.00</p></div><button id="pin" class="quiet">Pin for A/B</button></div><audio id="current-audio" controls preload="metadata"></audio></div>
+<div class="take pinned"><div class="section-heading"><div><h3>Pinned comparison</h3><p id="pinned-settings" class="small muted">Unchanged vector-only baseline</p></div></div><audio id="pinned-audio" controls preload="metadata"></audio></div>
+<form id="save-form" class="save"><label for="draft-name">Keep this preview</label><div class="inline"><input id="draft-name" maxlength="60" placeholder="Give this voice a name" required><button id="save" type="submit" disabled>Save draft</button></div><p id="save-note" class="small muted">Keeps the exact audio, matching text, frozen vector and PCA settings. The active provider determines whether reusable voice saving is available.</p></form>
+</section>
+</div>
+<section class="library" aria-labelledby="draft-title"><div class="section-heading"><h2 id="draft-title">Your voices and drafts</h2><span class="small muted">No automatic enrollment or training</span></div><div id="draft-list"><p class="muted">Saved voice drafts and their recipes will appear here.</p></div></section>
+<details class="probes"><summary>Listen to the earlier checks</summary><p class="small muted">Explicit pre-rendered comparisons, not substitutes for the current slider settings.</p><div id="probe-list"></div></details>
+<footer>Working prototype · real model-scoped PCA · visual proposal not yet selected</footer>
+</main></body></html>

@@ -140,17 +140,6 @@ pub fn ggml_device(device: &str) -> Result<Option<String>> {
     Ok(Some(value.to_owned()))
 }
 
-/// What a session is conditioned on: a reference recording or a description.
-pub(crate) enum Request<'a> {
-    Reference {
-        audio: &'a Path,
-        transcript: &'a str,
-    },
-    Design {
-        description: &'a str,
-        seed: Option<u64>,
-    },
-}
 /// One loaded engine with checkpoint-scoped reference or description conditioning.
 /// A description session samples candidates; it does not establish a persistent voice identity.
 pub struct Session {
@@ -175,19 +164,23 @@ impl Session {
         if transcript.trim().is_empty() {
             bail!("reference transcript must not be empty");
         }
-        Self::load_request(
-            model,
-            language,
-            options,
-            Request::Reference {
-                audio: reference,
-                transcript,
-            },
-        )
+        let kind = select_backend(model, options.backend)?;
+        let inner = match kind {
+            #[cfg(any(spqx_mlx, feature = "tch-backend"))]
+            Backend::Mlx | Backend::Tch => Inner::Native(Box::new(NativeSession::load(
+                model, reference, transcript, language, options,
+            )?)),
+            #[cfg(feature = "qwentts")]
+            Backend::Ggml => Inner::Ggml(crate::ggml::Session::load(
+                model, reference, transcript, language, options,
+            )?),
+            _ => bail!("engine is not compiled in"),
+        };
+        Ok(Self { kind, inner })
     }
     /// Load a VoiceDesign checkpoint once, without reference audio or a preset speaker.
     /// Repeated synthesis reuses the model and description, not an enrolled identity.
-    /// Implemented by the pinned GGML engine and native MLX; no backend/SDK fallback.
+    /// Only the pinned GGML engine implements this operation; no backend/SDK fallback.
     /// A seed is scoped to this engine/checkpoint, not portable voice conditioning.
     pub fn load_voice_design(
         model: &Path,
@@ -197,39 +190,114 @@ impl Session {
         options: &EngineOptions,
     ) -> Result<Self> {
         let seed = validate_design(description, language, seed)?;
-        Self::load_request(
+        Self::load_conditioned(
             model,
             language,
             options,
-            Request::Design {
-                description,
-                seed: u64::try_from(seed).ok(),
+            PreparedInput::Description { description, seed },
+        )
+    }
+    /// Load an exact saved raw speaker vector, without reference encoding or ICL substitution.
+    /// The consuming backend/artifacts must match; native validates model width before generation.
+    pub fn load_frozen(
+        model: &Path,
+        frozen: &crate::conditioning::FrozenConditioning,
+        language: &str,
+        seed: Option<u64>,
+        options: &EngineOptions,
+    ) -> Result<Self> {
+        frozen.validate()?;
+        let seed = checked_seed(seed)?;
+        Self::load_conditioned(
+            model,
+            language,
+            options,
+            PreparedInput::Frozen { frozen, seed },
+        )
+    }
+    /// Load the exact speaker vector, original reference codes and text; never reads a source WAV.
+    pub fn load_frozen_icl(
+        model: &Path,
+        prompt: &crate::icl::FrozenIcl,
+        language: &str,
+        seed: Option<u64>,
+        options: &EngineOptions,
+    ) -> Result<Self> {
+        prompt.validate()?;
+        if language.trim().is_empty() || language.len() > 64 || language.contains('\0') {
+            bail!("invalid frozen ICL target language");
+        }
+        Self::load_conditioned(
+            model,
+            language,
+            options,
+            PreparedInput::Icl {
+                prompt,
+                seed: checked_seed(seed)?,
             },
         )
     }
-    /// The single engine-dispatch path; each engine receives the same request kind.
-    fn load_request(
+    fn load_conditioned(
         model: &Path,
         language: &str,
         options: &EngineOptions,
-        request: Request<'_>,
+        input: PreparedInput<'_>,
     ) -> Result<Self> {
         let kind = select_backend(model, options.backend)?;
-        let inner: Result<Inner> = match kind {
-            #[cfg(any(spqx_mlx, feature = "tch-backend"))]
-            Backend::Mlx | Backend::Tch => Ok(Inner::Native(Box::new(NativeSession::load(
-                model, language, options, request,
-            )?))),
+        let inner = match kind {
             #[cfg(feature = "qwentts")]
-            Backend::Ggml => Ok(Inner::Ggml(crate::ggml::Session::open(
-                model, language, options, request,
-            )?)),
-            _ => bail!("engine {kind:?} is not compiled in"),
+            Backend::Ggml => Inner::Ggml(match input {
+                PreparedInput::Description { description, seed } => {
+                    crate::ggml::Session::load_voice_design(
+                        model,
+                        description,
+                        language,
+                        seed,
+                        options,
+                    )?
+                }
+                PreparedInput::Frozen { frozen, seed } => {
+                    crate::ggml::Session::load_frozen(model, frozen, language, seed, options)?
+                }
+                PreparedInput::Icl { prompt, seed } => {
+                    crate::ggml::Session::load_frozen_icl(model, prompt, language, seed, options)?
+                }
+            }),
+            #[cfg(spqx_mlx)]
+            Backend::Mlx => Inner::Native(Box::new(match input {
+                PreparedInput::Description { description, seed } => NativeSession::load_design(
+                    model,
+                    description,
+                    language,
+                    u64::try_from(seed).ok(),
+                    options,
+                )?,
+                _ => bail!("frozen conditioning and ICL are not implemented for MLX; no fallback"),
+            })),
+            _ => bail!(
+                "{} is not implemented for {kind:?}; no fallback",
+                "requested non-reference conditioning"
+            ),
         };
-        Ok(Self {
-            kind,
-            inner: inner?,
-        })
+        Ok(Self { kind, inner })
+    }
+    /// Export the raw speaker vector from native reference preparation, without recognition enrollment.
+    pub fn frozen_conditioning(&self) -> Result<crate::conditioning::FrozenConditioning> {
+        match &self.inner {
+            #[cfg(feature = "qwentts")]
+            Inner::Ggml(engine) => engine.frozen_conditioning(),
+            #[cfg(any(spqx_mlx, feature = "tch-backend"))]
+            _ => bail!("raw conditioning export is not implemented for this engine; no fallback"),
+        }
+    }
+    /// Explicit complete ICL export; unsupported engines/modes never return a vector-only substitute.
+    pub fn frozen_icl(&self) -> Result<crate::icl::FrozenIcl> {
+        match &self.inner {
+            #[cfg(feature = "qwentts")]
+            Inner::Ggml(engine) => engine.frozen_icl(),
+            #[cfg(any(spqx_mlx, feature = "tch-backend"))]
+            _ => bail!("full ICL export is not implemented for this engine; no fallback"),
+        }
     }
     /// Selected engine name (not a claim that an automatic device was observed).
     pub fn backend_name(&self) -> &'static str {
@@ -311,6 +379,20 @@ impl Session {
     }
 }
 
+enum PreparedInput<'a> {
+    Icl {
+        prompt: &'a crate::icl::FrozenIcl,
+        seed: i64,
+    },
+    Description {
+        description: &'a str,
+        seed: i64,
+    },
+    Frozen {
+        frozen: &'a crate::conditioning::FrozenConditioning,
+        seed: i64,
+    },
+}
 fn validate_design(description: &str, language: &str, seed: Option<u64>) -> Result<i64> {
     if description.trim().is_empty() || description.len() > 4096 || description.contains('\0') {
         bail!("VoiceDesign description must be nonempty UTF-8, at most 4096 bytes, without NUL");
@@ -318,10 +400,13 @@ fn validate_design(description: &str, language: &str, seed: Option<u64>) -> Resu
     if language.trim().is_empty() || language.contains('\0') {
         bail!("VoiceDesign language must be nonempty and without NUL");
     }
+    checked_seed(seed)
+}
+fn checked_seed(seed: Option<u64>) -> Result<i64> {
     Ok(seed
         .map(i64::try_from)
         .transpose()
-        .context("VoiceDesign seed exceeds i64 range")?
+        .context("seed exceeds native i64 range")?
         .unwrap_or(-1))
 }
 
@@ -343,17 +428,11 @@ enum NativeMode {
 impl NativeSession {
     fn load(
         model: &Path,
+        reference: &Path,
+        transcript: &str,
         language: &str,
         options: &EngineOptions,
-        request: Request<'_>,
     ) -> Result<Self> {
-        if matches!(request, Request::Design { .. }) {
-            return Self::load_design(model, language, options, request);
-        }
-        let (reference, transcript) = match request {
-            Request::Reference { audio, transcript } => (audio, transcript),
-            Request::Design { .. } => unreachable!("handled above"),
-        };
         use crate::{
             audio::{load_wav_file, resample},
             audio_encoder::AudioEncoder,
@@ -399,23 +478,19 @@ impl NativeSession {
             mode: NativeMode::Reference(reference),
         })
     }
+    /// Description-only conditioning: official prompt, no speaker, explicit checkpoint kind.
     #[cfg(spqx_mlx)]
     fn load_design(
         model: &Path,
+        description: &str,
         language: &str,
+        seed: Option<u64>,
         options: &EngineOptions,
-        request: Request<'_>,
     ) -> Result<Self> {
-        let Request::Design { description, seed } = request else {
-            bail!("MLX design loader requires a description request");
-        };
         if !model.is_dir() {
             bail!("MLX VoiceDesign requires a local checkpoint directory");
         }
-        if !options.device.eq_ignore_ascii_case("auto")
-            && !options.device.eq_ignore_ascii_case("metal")
-            && !options.device.eq_ignore_ascii_case("gpu")
-        {
+        if !["auto", "metal", "gpu"].contains(&options.device.to_lowercase().as_str()) {
             bail!("MLX requires its Metal device; select GGML plus GGUF assets for another device");
         }
         // Reject the wrong checkpoint before loading gigabytes of weights.

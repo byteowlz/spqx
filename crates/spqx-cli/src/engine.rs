@@ -15,6 +15,9 @@ pub struct Reference {
     pub wav: PathBuf,
     pub text: String,
     pub label: String,
+    pub frozen: Option<spqx_core::conditioning::FrozenConditioning>,
+    pub icl_context: Option<spqx_core::icl::IclContext>,
+    pub seed: Option<u64>,
 }
 
 /// Resolve or acquire the configured pinned model (explicit paths stay local).
@@ -46,6 +49,9 @@ pub fn resolve_reference(
             wav: wav.to_path_buf(),
             text,
             label: wav.display().to_string(),
+            frozen: None,
+            icl_context: None,
+            seed: None,
         });
     }
 
@@ -69,6 +75,9 @@ pub fn resolve_reference(
         wav,
         text,
         label: name.to_string(),
+        frozen: None,
+        icl_context: None,
+        seed: None,
     })
 }
 
@@ -104,18 +113,47 @@ pub fn synthesize_streaming(
     // and piped output stay clean; it still reaches a human via stderr.
     let _stdout_guard = spqx_core::stdio::StdoutGuard::new()?;
 
-    let model_dir = resolve_model_dir(config)?;
-    let session = Session::load(
-        &model_dir,
-        &reference.wav,
-        &reference.text,
-        &spqx_core::worker::normalize_language(&config.voice.language),
-        &config.engine,
-    )?;
+    let language = spqx_core::worker::normalize_language(&config.voice.language);
+    let session = if let Some(frozen) = &reference.frozen {
+        load_frozen_session(
+            config,
+            frozen,
+            reference.icl_context.as_ref(),
+            &language,
+            reference.seed,
+        )?
+    } else {
+        if reference.icl_context.is_some() {
+            bail!("ICL context has no frozen speaker vector; no reference fallback");
+        }
+        Session::load(
+            &resolve_model_dir(config)?,
+            &reference.wav,
+            &reference.text,
+            &language,
+            &config.engine,
+        )?
+    };
 
-    stream_session(config, &session, text, true, on_chunk)
+    stream_session(config, &session, text, reference.frozen.is_none(), on_chunk)
 }
 
+/// One explicit frozen-mode choice shared by preview and canonical consumption.
+pub(crate) fn load_frozen_session(
+    config: &Config,
+    speaker: &spqx_core::conditioning::FrozenConditioning,
+    context: Option<&spqx_core::icl::IclContext>,
+    language: &str,
+    seed: Option<u64>,
+) -> Result<Session> {
+    let model = resolve_model_dir(config)?;
+    if let Some(context) = context {
+        let prompt = spqx_core::icl::FrozenIcl::new(speaker.clone(), context.clone())?;
+        Session::load_frozen_icl(&model, &prompt, language, seed, &config.engine)
+    } else {
+        Session::load_frozen(&model, speaker, language, seed, &config.engine)
+    }
+}
 /// Native description-only generation; never resolves or substitutes a registry reference.
 /// Returns generation statistics and preparation time separately. No audio postprocessing.
 pub fn design_streaming(

@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Explicit voice audition rating request",
+  "description": "Six subjective trait scores, two discrete judgements and separate quality. A midpoint is never inferred; nothing is stored without this request.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "bank",
+    "audio_sha256",
+    "operation_id",
+    "expected_revision",
+    "gender",
+    "age_band",
+    "scores",
+    "naturalness",
+    "excluded",
+    "pronunciation_issue",
+    "notes"
+  ],
+  "properties": {
+    "bank": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "audio_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "operation_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"
+    },
+    "expected_revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "scores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pitch",
+        "brightness",
+        "breathiness",
+        "roughness",
+        "weight",
+        "nasality"
+      ],
+      "properties": {
+        "pitch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "brightness": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "breathiness": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "roughness": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "weight": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "nasality": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "naturalness": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "excluded": {
+      "type": "boolean"
+    },
+    "pronunciation_issue": {
+      "type": "boolean"
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 600
+    },
+    "gender": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "masculine",
+            "feminine",
+            "androgynous",
+            "unclear"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Explicit judgement; null leaves the category unrated. Not a continuum."
+    },
+    "age_band": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "young",
+            "middle",
+            "older",
+            "unclear"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Explicit judgement; null leaves the category unrated. Not a continuum."
+    }
+  }
+}

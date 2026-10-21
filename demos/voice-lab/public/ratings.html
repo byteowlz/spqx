@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" data-scheme="oqto-light">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Rate voices · Voice Lab</title><link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="ratings.css"><script src="ratings.js" defer></script></head>
+<body>
+<header class="top"><a class="wordmark" href="./">Voice Lab<span class="mark" aria-hidden="true"></span></a><span id="mode" class="muted">Voice calibration</span><a class="quiet" href="./">Shape a voice</a></header>
+<main>
+<div class="intro"><div><h1>Listen. Describe. Next.</h1><p>Rate the sound, not the description that made it.</p></div><div class="space-meta"><strong id="progress">Loading your auditions…</strong><span id="bank-status">Saved scores will be restored.</span></div></div>
+<p id="notice" role="status" aria-live="polite" hidden></p>
+<div class="workbench rating-workbench" id="rating-workbench" hidden>
+<section class="controls" aria-labelledby="voice-title">
+<div class="section-heading"><h2 id="voice-title">Voice</h2><span id="rated-tag" class="tag">Not rated</span></div>
+<label for="voice-select" class="small">Choose an audition</label><select id="voice-select"></select>
+<audio id="rating-audio" controls preload="metadata" aria-label="Current audition"></audio>
+<p id="audio-info" class="small muted"></p>
+<details class="readout"><summary>Read the audition text</summary><p id="rating-text" lang="de"></p></details>
+<div class="rating-nav"><button id="previous" type="button">Previous</button><button id="next" type="button">Next</button></div>
+<button id="unrated" type="button" class="quiet">Next unrated voice</button>
+<p class="small muted">Same words. Same seed. Prompts hidden. Vector-only voices, without reference context.</p>
+<button id="refresh" class="quiet" type="button">Reload saved ratings</button>
+</section>
+<section class="audition" aria-labelledby="describe-title">
+<div class="section-heading"><h2 id="describe-title">What do you hear?</h2><span id="draft-state" class="small muted">Not saved</span></div>
+<p class="small muted">Use 0–100. Untouched sliders stay at 50; nothing is recorded until you save.</p>
+<p class="small muted">Categories are separate judgements, not scales.</p>
+<p id="pending-note" class="small muted" hidden>Voice presentation and age band were not recorded for this saved rating. Choose them and save to complete it; your scores and naturalness are kept.</p>
+<div id="categories" class="categories"></div>
+<form id="rating-form"><fieldset id="rating-fields"><legend class="sr-only">Voice traits and quality</legend>
+<div id="trait-sliders" class="trait-grid"></div>
+<div class="quality axis"><div class="inline"><label for="naturalness">Naturalness</label><output id="naturalness-value" for="naturalness">50</output></div><input id="naturalness" name="naturalness" type="range" min="0" max="100" step="1" value="50"><div class="scale"><span>Broken / unusable</span><span>Natural / effortless</span></div></div>
+<label class="check"><input id="pronunciation-issue" type="checkbox">Pronunciation or intelligibility issue</label>
+<label class="check"><input id="excluded" type="checkbox">Exclude this voice from calibration</label>
+<label for="rating-notes" class="small">Notes <span class="muted">(optional)</span></label><textarea id="rating-notes" rows="2" maxlength="600" placeholder="Anything the sliders miss"></textarea>
+</fieldset>
+<div class="rating-actions"><button id="save-rating" type="submit" value="next" class="primary">Save &amp; next</button><button id="save-only" type="submit" value="stay">Save only</button></div>
+<p class="small muted">Saves these scores against this exact audition. No synthesis, training or voice enrollment.</p>
+</form>
+</section>
+</div>
+<div id="empty" hidden><h2>No auditions are ready yet.</h2><p>Completed takes will appear here. You can return to voice shaping or reload the bank.</p><button id="empty-refresh" type="button">Reload auditions</button> <a href="./">Shape a voice</a></div>
+</main></body></html>

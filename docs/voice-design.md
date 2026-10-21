@@ -36,7 +36,8 @@ The loaded checkpoint type must be exactly `voice_design`: GGML checks libqwen's
 
 Descriptions must be nonblank, NUL-free and at most 4096 UTF-8 bytes. A candidate must reach EOS, and be finite, non-silent and unclipped, or it is rejected unsaved. An explicit `--seed` is one deterministic attempt; if it misses EOS nothing is saved and the CLI says so. An unseeded run tries at most three recorded random seeds and reports the seed used and any rejected seeds. MLX applies a per-request seeded key sequence without touching a global RNG, so a seed request replays the same candidate. Reused descriptions sample candidates, not an automatically persistent speaker identity. For later cloning, explicitly select and preserve an audition's raw audio, matching text and provenance.
 
-Legacy tensor-level VoiceDesign is **not implemented**; the old `Qwen3TTSModel::generate_voice_design` reports an explicit unsupported error instead of a two-second zero waveform. CustomVoice/preset support and PCA-conditioned synthesis are separate capabilities. No worker opcode was added: description-mode framed-worker startup and Voice Lab integration remain separate work.
+Legacy tensor-level VoiceDesign is **not implemented**; the old `Qwen3TTSModel::generate_voice_design` reports an explicit unsupported error instead of a two-second zero waveform. CustomVoice/preset support and PCA-conditioned synthesis are separate capabilities. No worker opcode was added: description-mode framed-worker startup and Voice Lab integration remain separate work. Frozen Base-model PCA and canonical-save integration are described in [frozen voices](frozen-voices.md), not capabilities of the description constructor itself.
+
 
 ## Verification scope
 
@@ -64,6 +65,9 @@ The VoiceDesign token layout, seed-key behaviour and checkpoint/language/text va
 The source landing preserves both `design` and `models download`. The integrated model-free suite passed 33 tests (3 explicit native/MLX cases ignored), and portable core/CLI `cargo check` passed. A new CLI regression checks both commands and rejects missing VoiceDesign `model.path` before creating a Base cache or candidate WAV, with clean JSON stdout. No new inference or MLX VoiceDesign parity is claimed by this landing.
 
 Structural review reported zero gating regressions: seven static dead-code findings on test functions/modules, three minor churn findings and one 61-line native acceptance-test verbosity finding. These were reviewed, not treated as a clean absence of findings; the self-contained ignored acceptance retains its separate actual CUDA evidence above. Static caller coverage is incomplete across subprocess/FFI tests.
+
+This VoiceDesign proof does not qualify PCA or canonical saving. Frozen Base-model PCA and canonical saving are a separate, separately qualified native GGML feature described in [frozen voices](frozen-voices.md); SDK and native banks are not interchangeable.
+
 
 ## Reproduce
 
