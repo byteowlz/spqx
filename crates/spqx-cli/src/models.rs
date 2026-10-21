@@ -62,6 +62,9 @@ pub fn resolve(config: &Config) -> Result<PathBuf> {
         }
         return Ok(path);
     }
+    if config.engine.backend == spqx_core::synthesis::Backend::Tch {
+        bail!("legacy tch requires explicit model.path; automatic downloads support GGML and MLX");
+    }
     let profiles = profiles()?;
     let mut id = config.model.id.as_str();
     // An explicit engine selects its compatible built-in profile. Custom IDs
@@ -103,7 +106,7 @@ pub fn resolve(config: &Config) -> Result<PathBuf> {
 
 fn env_offline() -> bool {
     std::env::var("HF_HUB_OFFLINE")
-        .is_ok_and(|s| matches!(s.to_lowercase().as_str(), "1" | "true" | "yes"))
+        .is_ok_and(|s| matches!(s.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
 }
 
 fn custom_snapshot(cache: &Path, id: &str) -> Option<PathBuf> {
