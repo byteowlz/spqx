@@ -40,22 +40,32 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct ModelConfig {
-    /// Hugging Face model id resolved from the local HF cache.
+    /// Hugging Face model ID. Built-in profiles are revision/SHA256 pinned.
     pub id: String,
     /// Explicit local model directory; takes precedence over `id`.
     pub path: Option<String>,
+    /// Fetch missing/corrupt files for a built-in model on first use.
+    pub auto_download: bool,
+    /// Never contact model servers; require an intact local snapshot.
+    pub offline: bool,
 }
 
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            id: if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            id: if cfg!(all(
+                target_os = "macos",
+                target_arch = "aarch64",
+                feature = "mlx"
+            )) {
                 "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit"
             } else {
                 "Serveurperso/Qwen3-TTS-GGUF"
             }
             .to_string(),
             path: None,
+            auto_download: true,
+            offline: false,
         }
     }
 }

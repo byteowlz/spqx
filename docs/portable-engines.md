@@ -64,7 +64,7 @@ Bundles contain the CLI/worker, matching native libraries or MLX metallib, insta
 
 `uv run --no-project scripts/package.py --verify <extracted-root>` checks the recorded files. `install.sh --bundle <archive>` verifies its adjacent `.sha256` and installs without replacing existing commands/configuration. Extracted Windows bundles use `install.cmd [destination]`. No installer changes services, PATH, execution policy, model files or reference recordings. A Linux wrapper sets only its process-local library path; do not run the `-real` executable directly. Use a fresh destination for side-by-side upgrades.
 
-The release workflow builds macOS ARM64 MLX, Linux x64 CPU/CUDA12-SM89 and Windows x64 CPU candidates with dependency/source inventories. It does not provision model weights or execute GPU inference. OS frameworks, Linux glibc/libstdc++/ALSA, Windows UCRT and NVIDIA drivers remain system dependencies. Deployment minimums are determined by the actual build host/ELF symbols, not the target triple alone. The existing Windows proof is a native VM/developer-toolchain environment, not a fresh Windows installation.
+The release workflow builds macOS ARM64 MLX, Linux x64 CPU/CUDA12-SM86+SM89 and Windows x64 CPU candidates with dependency/source inventories. It does not provision model weights or execute GPU inference. OS frameworks, Linux glibc/libstdc++/ALSA, Windows UCRT and NVIDIA drivers remain system dependencies. Deployment minimums are determined by the actual build host/ELF symbols, not the target triple alone. The existing Windows proof is a native VM/developer-toolchain environment, not a fresh Windows installation.
 
 For relocated acceptance, the opt-in test supports `SPQX_TEST_WORKER=<absolute copied worker>` and `SPQX_TEST_LIBRARY=auto` (GGML executable-relative discovery). On Apple Silicon, build `native_cpu` with `--features mlx,qwentts` and select the ignored `mlx_runtime_worker_contract` test, setting `SPQX_TEST_MODEL` to an explicit prepared MLX snapshot. Model execution requires fresh compute admission independently of compilation/packaging.
 
@@ -89,7 +89,7 @@ codec = "/models/qwen-tokenizer-12hz-F32.gguf"
 language = "german"
 ```
 
-`spqx config schema` describes the new engine section. Flags override environment (`SPQX_BACKEND`, `SPQX_DEVICE`, `SPQX_ENGINE_LIBRARY`, `SPQX_CODEC`), then config/defaults. Automatic engine selection uses model format and compiled availability; it never downloads a model or silently maps an unavailable explicitly requested device to another accelerator/cloud service.
+`spqx config schema` describes the new engine section. Flags override environment (`SPQX_BACKEND`, `SPQX_DEVICE`, `SPQX_ENGINE_LIBRARY`, `SPQX_CODEC`), then config/defaults. Automatic engine selection uses model format and compiled availability. On first use, the CLI now downloads only its compatible pinned model profile when missing; it never silently maps an unavailable explicitly requested device to another accelerator/cloud service. Use `spqx models download` to prefetch, or `--offline` / `SPQX_OFFLINE=true` for cache-only operation. `HF_HUB_OFFLINE=1` also forces offline. Set `[model] auto_download=false` to disable implicit fetches. Explicit `model.path` is never overwritten; custom model IDs remain local-cache-only. See ADR 0002 for cache/integrity semantics.
 
 ```sh
 spqx --backend ggml --device cpu say "Der Bericht ist fertig." \

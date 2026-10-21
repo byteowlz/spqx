@@ -17,22 +17,9 @@ pub struct Reference {
     pub label: String,
 }
 
-/// Resolve the local model directory: explicit `model.path`, else the newest
-/// Hugging Face cache snapshot of `model.id`.
+/// Resolve or acquire the configured pinned model (explicit paths stay local).
 pub fn resolve_model_dir(config: &Config) -> Result<PathBuf> {
-    if let Some(path) = &config.model.path {
-        let path = expand(path);
-        if path.exists() {
-            return Ok(path);
-        }
-        bail!("model.path {} does not exist", path.display());
-    }
-    hf_snapshot(&config.model.id).with_context(|| {
-        format!(
-            "model {} not found in the Hugging Face cache; download it or set model.path",
-            config.model.id
-        )
-    })
+    crate::models::resolve(config)
 }
 
 /// Resolve a reference voice from explicit paths, else a registry voice name,
@@ -177,34 +164,11 @@ pub fn synthesize_streaming(
     })
 }
 
-fn expand(path: &str) -> PathBuf {
+pub(crate) fn expand(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
             return PathBuf::from(home).join(rest);
         }
     }
     PathBuf::from(path)
-}
-
-/// Newest snapshot directory for an HF model id in the local cache.
-fn hf_snapshot(model_id: &str) -> Option<PathBuf> {
-    let cache = if let Some(cache) = std::env::var_os("HF_HUB_CACHE") {
-        PathBuf::from(cache)
-    } else if let Some(home) = std::env::var_os("HF_HOME") {
-        PathBuf::from(home).join("hub")
-    } else {
-        PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?)
-            .join(".cache/huggingface/hub")
-    };
-    let snapshots = cache
-        .join(format!("models--{}", model_id.replace('/', "--")))
-        .join("snapshots");
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(&snapshots)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    entries.sort();
-    entries.pop()
 }

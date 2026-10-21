@@ -101,7 +101,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Build CUDA 12 bundle without a GPU
         env:
-          SPQX_CUDA_ARCHITECTURES: '89'
+          SPQX_CUDA_ARCHITECTURES: '86;89'
           SPQX_CUDA_EULA_VERSION: '12.0.1'
         run: |
           # Checkout's temporary Git HOME differs inside this root container.
@@ -131,4 +131,4 @@ jobs:
             dist/release/*.sha256
           if-no-files-found: error
 # Hosted GPU execution is not implied: real model acceptance is opt-in and
-# recorded separately. CUDA artifact currently targets SM89 (tested RTX4090).
+# recorded separately. CUDA artifact compiles SM86/SM89 (Ampere/Ada).

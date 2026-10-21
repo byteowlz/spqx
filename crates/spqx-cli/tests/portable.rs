@@ -29,6 +29,8 @@ impl Scratch {
             cmd.env(key, &self.0);
         }
         for key in [
+            "SPQX_OFFLINE",
+            "HF_HUB_OFFLINE",
             "SPQX_CONFIG",
             "SPQX_BACKEND",
             "SPQX_DEVICE",
@@ -70,6 +72,20 @@ fn engine_flags_override_config_and_json_stays_clean() {
     assert_eq!(value["engine"]["backend"], "ggml");
     assert_eq!(value["engine"]["device"], "cpu");
 }
+#[test]
+fn offline_flag_overrides_config_without_consuming_subcommands() {
+    let scratch = Scratch::new();
+    let output = scratch
+        .command()
+        .args(["--offline", "--json", "config", "show"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["model"]["offline"], true);
+    assert_eq!(value["model"]["auto_download"], true);
+}
+
 #[cfg(feature = "qwentts")]
 #[test]
 fn startup_error_is_one_binary_frame_not_engine_chatter() {

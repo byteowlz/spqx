@@ -7,6 +7,7 @@
 
 mod config;
 mod engine;
+mod models;
 mod paths;
 mod playback;
 mod say;
@@ -54,6 +55,9 @@ pub struct CommonOpts {
     /// Override the config file path (also: SPQX_CONFIG)
     #[arg(long, value_name = "PATH", global = true, env = "SPQX_CONFIG")]
     config: Option<PathBuf>,
+    /// Require cached models only (also SPQX_OFFLINE; HF_HUB_OFFLINE forces offline).
+    #[arg(long, global = true, env = "SPQX_OFFLINE", num_args=0..=1, require_equals=true, default_missing_value="true")]
+    offline: Option<bool>,
     /// Output machine-readable JSON
     #[arg(long, global = true)]
     json: bool,
@@ -77,6 +81,9 @@ pub struct CommonOpts {
 impl CommonOpts {
     fn load_config(&self) -> Result<Config> {
         let mut config = Config::load(self.config.as_deref())?;
+        if let Some(offline) = self.offline {
+            config.model.offline = offline;
+        }
         if let Some(backend) = self.backend {
             config.engine.backend = backend;
         }
@@ -97,6 +104,11 @@ impl CommonOpts {
 enum Command {
     /// Speak text with live playback and/or WAV output
     Say(say::SayArgs),
+    /// Prefetch the configured pinned model without running inference.
+    Models {
+        #[command(subcommand)]
+        command: ModelsCommand,
+    },
     /// Manage the named voice registry
     Voices(voices::VoicesArgs),
     /// Run the binary-framed worker protocol on stdin/stdout
@@ -111,6 +123,12 @@ enum Command {
         #[arg(value_enum)]
         shell: Shell,
     },
+}
+
+#[derive(Debug, Clone, Copy, Subcommand)]
+enum ModelsCommand {
+    /// Download/verify the configured model explicitly. Still honors --offline.
+    Download,
 }
 
 #[derive(Debug, Clone, Copy, Subcommand)]
@@ -133,6 +151,19 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Say(args) => say::run(args, &cli.common),
+        Command::Models {
+            command: ModelsCommand::Download,
+        } => {
+            let mut config = cli.common.load_config()?;
+            config.model.auto_download = true;
+            let path = models::resolve(&config)?;
+            if cli.common.json {
+                println!("{}", serde_json::json!({"path":path}));
+            } else {
+                println!("{}", path.display());
+            }
+            Ok(())
+        }
         Command::Voices(args) => voices::run(args, &cli.common),
         Command::Serve(args) => serve::run(args, &cli.common),
         Command::Config { command } => run_config(command, &cli.common),
