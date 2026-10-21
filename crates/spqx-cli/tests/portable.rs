@@ -64,18 +64,12 @@ impl Drop for Scratch {
 #[test]
 fn engine_flags_override_config_and_json_stays_clean() {
     let scratch = Scratch::new();
-    let value = scratch.config(&["--backend", "ggml", "--device", "cpu"]);
+    let value = scratch.config(&["--backend", "ggml", "--device", "cpu", "--offline"]);
     assert_eq!(value["engine"]["backend"], "ggml");
     assert_eq!(value["engine"]["device"], "cpu");
-}
-#[test]
-fn offline_flag_overrides_config_without_consuming_subcommands() {
-    let scratch = Scratch::new();
-    let value = scratch.config(&["--offline"]);
     assert_eq!(value["model"]["offline"], true);
     assert_eq!(value["model"]["auto_download"], true);
 }
-
 #[cfg(feature = "qwentts")]
 #[test]
 fn startup_error_is_one_binary_frame_not_engine_chatter() {
