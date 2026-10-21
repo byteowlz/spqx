@@ -3,26 +3,28 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { RatingBank, traits, validateRating } from './ratings';
+import { categories, RatingBank, traits, validateRating } from './ratings';
 import { ratingFixture } from './ratings-fixture';
 import { createApp } from './core';
 const roots:string[]=[];
 afterAll(async()=>{await Promise.all(roots.map(root=>rm(root,{recursive:true,force:true})));});
 async function setup(){
- const root=await mkdtemp(join(tmpdir(),'spqx-ratings-'));roots.push(root);const fixture=await ratingFixture(root);const bank=new RatingBank(root);
- const value={bank:'synthetic-test-bank',audio_sha256:fixture.ready[0].audio_sha256,operation_id:randomUUID(),expected_revision:0,scores:Object.fromEntries(traits.map(t=>[t.id,50])),naturalness:70,excluded:false,pronunciation_issue:false,notes:'Synthetic test annotation'};
+ const root=await mkdtemp(join(tmpdir(),'spqx-ratings-'));roots.push(root);const fixture=await ratingFixture(root,undefined,{categories,requested_reference:'HIDDEN REQUESTED FEMININE'});const bank=new RatingBank(root);
+ const value={bank:'synthetic-test-bank',audio_sha256:fixture.ready[0].audio_sha256,operation_id:randomUUID(),expected_revision:0,gender:'masculine',age_band:'young',scores:Object.fromEntries(traits.map(t=>[t.id,50])),naturalness:70,excluded:false,pronunciation_issue:false,notes:'Synthetic test annotation'};
  let renders=0;
  const app=createApp({origin:'http://127.0.0.1:8805',data:join(root,'app'),info:{},publicDir:join(import.meta.dir,'public'),media:new Map(),allowedRoots:[root],maxDaily:1,ratings:bank,render:async()=>{renders++;throw new Error('must not render');}});
  const req=(path:string,body?:unknown,origin:string|null='http://127.0.0.1:8805')=>new Request('http://127.0.0.1:8805'+path,{method:body?'POST':'GET',headers:{Host:'127.0.0.1:8805',...(body?{'Content-Type':'application/json',...(origin?{Origin:origin}:{})}:{})},body:body?JSON.stringify(body):undefined});
  return {root,bank,value,app,req,renders:()=>renders};
 }
 test('blind unrated bank whitelists state and never creates midpoint labels',async()=>{
- const {root,bank}=await setup(),state=await bank.state();expect(state.rated).toBe(0);expect(state.candidates.every(c=>c.rating===null)).toBe(true);expect(JSON.stringify(state)).not.toContain('HIDDEN');expect(state.traits).toHaveLength(6);expect(await readdir(root)).not.toContain('ratings');
+ const {root,bank}=await setup(),state=await bank.state();expect(state.rated).toBe(0);expect(state.candidates.every(c=>c.rating===null)).toBe(true);expect(JSON.stringify(state)).not.toContain('HIDDEN');expect(state.traits).toHaveLength(6);expect(state.categories.map(c=>c.id)).toEqual(['gender','age_band']);expect(state.categories[0].options.map(o=>o.id)).toContain('unclear');expect(await readdir(root)).not.toContain('ratings');
 });
 test('rating bodies have exact six finite integer traits and separate quality',async()=>{
  const {value}=await setup();expect(validateRating(value)).toEqual(value);
- for(const bad of [{...value,command:'exec'},{...value,naturalness:null},{...value,scores:{...value.scores,pitch:101}},{...value,scores:{...value.scores,pitch:1.1}},{...value,scores:{...value.scores,age:50}},{...value,scores:{}},{...value,notes:'x'.repeat(601)},{...value,excluded:'yes'},{...value,operation_id:'../../outside'}])expect(()=>validateRating(bad)).toThrow();
+ for(const bad of [{...value,command:'exec'},{...value,naturalness:null},{...value,scores:{...value.scores,pitch:101}},{...value,scores:{...value.scores,pitch:1.1}},{...value,scores:{...value.scores,age:50}},{...value,scores:{}},{...value,notes:'x'.repeat(601)},{...value,excluded:'yes'},{...value,operation_id:'../../outside'},{...value,gender:'over 100'},{...value,gender:'manly'},{...value,age_band:'middle-aged adult'},{...value,age_band:50},(()=>{const {gender,...rest}=value;return rest;})(),(()=>{const {age_band,...rest}=value;return rest;})()])expect(()=>validateRating(bad)).toThrow();
 });
+test('categories are explicit judgements and allow an honest unclear answer',async()=>{const {root,bank,value}=await setup();for(const bad of [{...value,gender:undefined},{...value,gender:'androgyny'}])await expect(bank.save('c001',bad)).rejects.toThrow();const unclear=await bank.save('c001',{...value,gender:'unclear',age_band:'unclear'});expect(unclear.gender).toBe('unclear');const unjudged=await new RatingBank(root).save('c002',{...value,audio_sha256:(await bank.state()).candidates[1].audio_sha256,operation_id:randomUUID(),gender:null,age_band:null});expect([unjudged.gender,unjudged.age_band]).toEqual([null,null]);expect((await new RatingBank(root).state()).candidates[1].rating).toEqual(unjudged);});
+test('a bank that redefines categories is refused rather than silently relabelled',async()=>{const root=await mkdtemp(join(tmpdir(),'spqx-rating-mismatch-'));roots.push(root);await ratingFixture(root,undefined,{categories:[{id:'gender',label:'Gender',options:[{id:'male',label:'Male'}]}]});await expect(new RatingBank(root).state()).rejects.toMatchObject({code:'bank_invalid'});});
 test('exact audition-bound save persists across reload; ack-lost retry is idempotent',async()=>{
  const {root,bank,value}=await setup();const first=await bank.save('c001',value);expect(first.revision).toBe(1);expect(first.source).toBe('explicit-rating');expect(await new RatingBank(root).save('c001',Object.fromEntries(Object.entries(value).reverse()))).toEqual(first);
  expect((await bank.state()).rated).toBe(1);expect((await bank.state()).candidates[0].rating?.scores).toEqual(value.scores);expect((await readdir(join(root,'ratings')))).toEqual(['c001.json']);

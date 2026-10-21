@@ -17,6 +17,15 @@ and nasality. Naturalness is separate; pronunciation/intelligibility issues,
 exclusion and notes are explicit. Midpoint defaults are not stored until Save.
 There is no accent axis, machine trait labeling, neural training or enrollment.
 
+Voice presentation and age band are rated as discrete choices (masculine, feminine,
+androgynous, unclear; young, middle-aged, older adult, unclear), never as sliders.
+A continuum would imply an axis the audio does not define and a midpoint default
+nobody judged. Each must be chosen explicitly and "unclear" is a first-class
+answer. These are perceptions of the produced voice, not the bank's hidden
+requested attributes, and they allow a request-validity check: does the heard
+presentation and age band match what was asked for? That is aggregate evidence
+about the bank; it never turns a requested label into a human rating.
+
 Private custody: original designed WAV/text/description/seed, exact extracted and
 effective vectors, raw audition WAV/text/bundle, hashes and stage receipts.
 Listening AAC copies use constant gain only; raw outputs remain unchanged.
@@ -50,11 +59,12 @@ are not exposed. Source prompts and requested categories must not become labels.
 - `ratings/cNNN.json`: versioned explicit annotation; absent means **unrated**.
 - `ratings/cNNN.lock`: cross-process exclusive save lock, with pid/intent/time.
 
-`GET /api/ratings` returns blind state, trait definitions and saved annotations.
+`GET /api/ratings` returns blind state, trait and category definitions and saved
+annotations. The bank's requested presentation/age fields are never returned.
 `GET /media/rating-cNNN` serves verified AAC with byte ranges. `POST
 /api/ratings/cNNN` accepts [rating-request.schema.json](../demos/voice-lab/rating-request.schema.json):
-bank/audio hashes, expected revision, UUIDv4 operation id, six scores, quality,
-flags and notes. Send the exact app Origin and JSON content type, including from
+bank/audio hashes, expected revision, UUIDv4 operation id, six scores, both
+category choices (or `null`), quality, flags and notes. Send the exact app Origin and JSON content type, including from
 CLI clients. Existing exact Host/mandatory write-Origin and private-tailnet keyless
 policy apply. Reachability is not conversational/session-binding authority.
 
@@ -84,8 +94,11 @@ Do not ship a retro-console control surface until useful audible edits are shown
 ## Evidence
 
 `just test`, `just check`, `just ratings-browser-check` in `demos/voice-lab`.
+The browser check also compiles the plain-JS rater for the browser, because a
+TypeScript annotation there silently blanks the page.
 The browser check starts a fresh isolated loopback 8805 service with synthetic
 non-speech audio/state only. It tests keyboard edits, zero drag-save/inference,
+explicit-category enforcement and category reload, hidden requested attributes,
 acknowledgement-loss retry, stale tabs, reload, unsaved navigation, AAC decode and
 playback clock, Range 206, Origin rejection and 320/390px overflow. It never rates
 or registers a real corpus candidate. Studio captures use a labeled read-only

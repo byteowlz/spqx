@@ -5,58 +5,21 @@
   "target_count": 2,
   "generation_status": "complete",
   "traits": [
-    {
-      "id": "pitch",
-      "label": "Pitch",
-      "low": "Low",
-      "high": "High"
-    },
-    {
-      "id": "brightness",
-      "label": "Brightness",
-      "low": "Dark",
-      "high": "Bright"
-    },
-    {
-      "id": "breathiness",
-      "label": "Breathiness",
-      "low": "Clear",
-      "high": "Airy"
-    },
-    {
-      "id": "roughness",
-      "label": "Roughness",
-      "low": "Smooth",
-      "high": "Raspy"
-    },
-    {
-      "id": "weight",
-      "label": "Vocal weight",
-      "low": "Light / thin",
-      "high": "Full / heavy"
-    },
-    {
-      "id": "nasality",
-      "label": "Nasality",
-      "low": "Open / oral",
-      "high": "Nasal"
-    }
+    {"id": "pitch", "label": "Pitch", "low": "Low", "high": "High"},
+    {"id": "brightness", "label": "Brightness", "low": "Dark", "high": "Bright"},
+    {"id": "breathiness", "label": "Breathiness", "low": "Clear", "high": "Airy"},
+    {"id": "roughness", "label": "Roughness", "low": "Smooth", "high": "Raspy"},
+    {"id": "weight", "label": "Vocal weight", "low": "Light / thin", "high": "Full / heavy"},
+    {"id": "nasality", "label": "Nasality", "low": "Open / oral", "high": "Nasal"}
   ],
+  "categories": [
+    {"id": "gender", "label": "Voice presentation", "options": [{"id": "masculine", "label": "Masculine"}, {"id": "feminine", "label": "Feminine"}, {"id": "androgynous", "label": "Androgynous"}, {"id": "unclear", "label": "Unclear"}]},
+    {"id": "age_band", "label": "Age band", "options": [{"id": "young", "label": "Young adult"}, {"id": "middle", "label": "Middle-aged adult"}, {"id": "older", "label": "Older adult"}, {"id": "unclear", "label": "Unclear"}]}
+  ],
+  "quality": {"label": "Naturalness", "low": "Broken / unusable", "high": "Natural / effortless"},
   "candidates": [
-    {
-      "id": "c001",
-      "seconds": 7.28,
-      "audio_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-      "media": "",
-      "rating": null
-    },
-    {
-      "id": "c002",
-      "seconds": 6.8,
-      "audio_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
-      "media": "",
-      "rating": null
-    }
+    {"id": "c001", "seconds": 7.28, "audio_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "media": "", "rating": null},
+    {"id": "c002", "seconds": 6.8, "audio_sha256": "1111111111111111111111111111111111111111111111111111111111111111", "media": "", "rating": null}
   ],
   "rated": 0
 }

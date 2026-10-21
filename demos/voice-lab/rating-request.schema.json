@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Explicit voice audition rating request",
+  "description": "Six subjective trait scores, two discrete judgements and separate quality. A midpoint is never inferred; nothing is stored without this request.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -8,6 +9,8 @@
     "audio_sha256",
     "operation_id",
     "expected_revision",
+    "gender",
+    "age_band",
     "scores",
     "naturalness",
     "excluded",
@@ -25,7 +28,7 @@
     },
     "operation_id": {
       "type": "string",
-      "format": "uuid"
+      "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"
     },
     "expected_revision": {
       "type": "integer",
@@ -89,6 +92,40 @@
     "notes": {
       "type": "string",
       "maxLength": 600
+    },
+    "gender": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "masculine",
+            "feminine",
+            "androgynous",
+            "unclear"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Explicit judgement; null leaves the category unrated. Not a continuum."
+    },
+    "age_band": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "young",
+            "middle",
+            "older",
+            "unclear"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Explicit judgement; null leaves the category unrated. Not a continuum."
     }
   }
 }

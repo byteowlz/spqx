@@ -10,6 +10,14 @@ export const traits = [
   {id:'weight',label:'Vocal weight',low:'Light / thin',high:'Full / heavy'},
   {id:'nasality',label:'Nasality',low:'Open / oral',high:'Nasal'},
 ] as const;
+// Categories are discrete judgements, not continua: there is no meaningful midpoint
+// default, so each must be chosen explicitly. They never leak the hidden requested description.
+export const categories = [
+  {id:'gender',label:'Voice presentation',options:[{id:'masculine',label:'Masculine'},{id:'feminine',label:'Feminine'},{id:'androgynous',label:'Androgynous'},{id:'unclear',label:'Unclear'}]},
+  {id:'age_band',label:'Age band',options:[{id:'young',label:'Young adult'},{id:'middle',label:'Middle-aged adult'},{id:'older',label:'Older adult'},{id:'unclear',label:'Unclear'}]},
+] as const;
+export type CategoryId=(typeof categories)[number]['id'];
+export type RatingChoice=(typeof categories)[number]['options'][number]['id']|null;
 export class RatingError extends Error {
   constructor(public code:string,message:string,public status=400){super(message);}
 }
@@ -19,14 +27,16 @@ const cid=(v:unknown):v is string=>typeof v==='string'&&/^c\d{3}$/.test(v);
 const score=(v:unknown):v is number=>typeof v==='number'&&Number.isInteger(v)&&v>=0&&v<=100;
 const plain=(v:any)=>v!==null&&typeof v==='object'&&!Array.isArray(v);
 export type Candidate={id:string;seconds:number;audio_sha256:string;listening_sha256:string};
-export type RatingInput={bank:string;audio_sha256:string;operation_id:string;expected_revision:number;scores:Record<string,number>;naturalness:number;excluded:boolean;pronunciation_issue:boolean;notes:string};
+export type RatingInput={bank:string;audio_sha256:string;operation_id:string;expected_revision:number;scores:Record<string,number>;naturalness:number;excluded:boolean;pronunciation_issue:boolean;notes:string}&Record<CategoryId,RatingChoice>;
 export type Rating=RatingInput&{version:1;candidate:string;revision:number;updated:string;source:'explicit-rating';fingerprint:string};
 export function validateRating(v:any):RatingInput {
-  const keys='audio_sha256,bank,excluded,expected_revision,naturalness,notes,operation_id,pronunciation_issue,scores';
+  const keys=[...categories.map(c=>c.id),'audio_sha256','bank','excluded','expected_revision','naturalness','notes','operation_id','pronunciation_issue','scores'].sort().join(',');
   if(!plain(v)||Object.keys(v).sort().join(',')!==keys||typeof v.bank!=='string'||v.bank.length>128||!sha(v.audio_sha256)||typeof v.operation_id!=='string'||!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v.operation_id)||!Number.isSafeInteger(v.expected_revision)||v.expected_revision<0||!score(v.naturalness)||typeof v.excluded!=='boolean'||typeof v.pronunciation_issue!=='boolean'||typeof v.notes!=='string'||v.notes.length>600||/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(v.notes))
-    throw new RatingError('invalid_rating','Send all six scores, naturalness, flags, notes and the displayed audio revision.');
+    throw new RatingError('invalid_rating','Send all six scores, both categories, naturalness, flags, notes and the displayed audio revision.');
   if(!plain(v.scores)||Object.keys(v.scores).sort().join(',')!==traits.map(t=>t.id).sort().join(',')||traits.some(t=>!score(v.scores[t.id])))throw new RatingError('invalid_scores','Each trait is an integer from0 to100.');
-  return {bank:v.bank,audio_sha256:v.audio_sha256,operation_id:v.operation_id,expected_revision:v.expected_revision,scores:Object.fromEntries(traits.map(t=>[t.id,v.scores[t.id]])),naturalness:v.naturalness,excluded:v.excluded,pronunciation_issue:v.pronunciation_issue,notes:v.notes.normalize('NFC')};
+  const chosen=Object.fromEntries(categories.map(c=>[c.id,v[c.id]===null?null:(c.options.some(o=>o.id===v[c.id])?v[c.id]:undefined)]));
+  if(categories.some(c=>chosen[c.id]!==null&&chosen[c.id]===undefined))throw new RatingError('invalid_categories','Choose one listed option per category, or null for unrated.');
+  return {...chosen,bank:v.bank,audio_sha256:v.audio_sha256,operation_id:v.operation_id,expected_revision:v.expected_revision,scores:Object.fromEntries(traits.map(t=>[t.id,v.scores[t.id]])),naturalness:v.naturalness,excluded:v.excluded,pronunciation_issue:v.pronunciation_issue,notes:v.notes.normalize('NFC')};
 }
 
 /** Private file-backed annotations. No synthesis, trait inference or registry operations. */
@@ -40,6 +50,8 @@ export class RatingBank {
     if(bytes.length>300000)throw new RatingError('bank_invalid','The audition bank is too large.',503);
     const v=JSON.parse(bytes);
     if(v.version!==1||v.mode!=='vector_only'||typeof v.id!=='string'||v.id.length>128||typeof v.text!=='string'||v.text.length>2000||!Number.isInteger(v.target_count)||v.target_count<1||v.target_count>200||!Array.isArray(v.ready)||v.ready.length>200)throw new RatingError('bank_invalid','The vector-only audition bank is incompatible.',503);
+    if(v.traits!==undefined&&JSON.stringify(v.traits)!==JSON.stringify(traits))throw new RatingError('bank_invalid','Bank trait definitions do not match the rater.',503);
+    if(v.categories!==undefined&&JSON.stringify(v.categories)!==JSON.stringify(categories))throw new RatingError('bank_invalid','Bank category definitions do not match the rater.',503);
     const ready:Candidate[]=v.ready.map((c:any)=>{
       if(!cid(c.id)||!sha(c.audio_sha256)||!sha(c.listening_sha256)||!Number.isFinite(c.seconds)||c.seconds<2||c.seconds>20)throw new RatingError('bank_invalid','An audition record is invalid.',503);
       return {id:c.id,seconds:c.seconds,audio_sha256:c.audio_sha256,listening_sha256:c.listening_sha256};
@@ -63,7 +75,7 @@ export class RatingBank {
       if(rating&&(rating.bank!==bank.id||rating.audio_sha256!==c.audio_sha256))throw new RatingError('rating_stale','A saved rating belongs to different audio. Ask the operator.',409);
       return {...c,media:'/media/rating-'+c.id,rating};
     }));
-    return {version:1,bank:bank.id,text:bank.text,target_count:bank.target_count,generation_status:bank.status,traits,quality:{label:'Naturalness',low:'Broken / unusable',high:'Natural / effortless'},candidates,rated:candidates.filter(c=>c.rating).length};
+    return {version:1,bank:bank.id,text:bank.text,target_count:bank.target_count,generation_status:bank.status,traits,categories,quality:{label:'Naturalness',low:'Broken / unusable',high:'Natural / effortless'},candidates,rated:candidates.filter(c=>c.rating).length};
   }
   async audio(id:string){
     if(!cid(id))throw new RatingError('not_found','No such audition.',404);

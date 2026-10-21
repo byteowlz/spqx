@@ -15,16 +15,29 @@ function slider(trait){
  for(const text of [trait.low,trait.high]){const span=document.createElement('span');span.textContent=text;scale.append(span);}
  line.append(label,output);box.append(line,input,scale);return box;
 }
-function values(){return {scores:Object.fromEntries(state.traits.map(t=>[t.id,Number($(t.id).value)])),naturalness:Number($('naturalness').value),excluded:$('excluded').checked,pronunciation_issue:$('pronunciation-issue').checked,notes:$('rating-notes').value};}
+function chosen(name){const input=document.querySelector(`input[name="${name}"]:checked`);return input?input.value:null;}
+function values(){return {gender:chosen('gender'),age_band:chosen('age_band'),scores:Object.fromEntries(state.traits.map(t=>[t.id,Number($(t.id).value)])),naturalness:Number($('naturalness').value),excluded:$('excluded').checked,pronunciation_issue:$('pronunciation-issue').checked,notes:$('rating-notes').value};}
+function categoryField(category){
+ const box=document.createElement('fieldset');box.className='category';
+ const legend=document.createElement('legend');legend.textContent=category.label;box.append(legend);
+ const row=document.createElement('div');row.className='choices';
+ for(const option of category.options){
+  const label=document.createElement('label');label.className='check';
+  const input=document.createElement('input');Object.assign(input,{type:'radio',name:category.id,value:option.id});
+  const text=document.createElement('span');text.textContent=option.label;label.append(input,text);row.append(label);
+ }
+ box.append(row);return box;
+}
 function updateOutputs(){for(const id of [...state.traits.map(t=>t.id),'naturalness'])$(id+'-value').value=$(id).value;}
 function draftChanged(){if(!current()||busy)return;updateOutputs();drafts.set(current().id,values());$('draft-state').textContent='Unsaved changes';}
 function setBusy(value){busy=value;$('rating-fields').disabled=value;for(const id of ['voice-select','previous','next','unrated','refresh','save-rating','save-only'])$(id).disabled=value||(fixture&&id.startsWith('save'));if(!value){$('previous').disabled=index===0;$('next').disabled=index===state.candidates.length-1;}}
 function progress(){const rated=state.candidates.filter(c=>c.rating).length;$('progress').textContent=`${rated} of ${state.candidates.length} rated`;$('bank-status').textContent=`${state.candidates.length} ready · ${state.generation_status==='complete'?'Bank complete':state.generation_status.replaceAll('_',' ')}`;}
 function display(next){
  if(busy||!state.candidates.length)return;
- index=next;pending=null;const c=current(),v=drafts.get(c.id)||c.rating||{scores:{},naturalness:50,excluded:false,pronunciation_issue:false,notes:''};
+ index=next;pending=null;const c=current(),v=drafts.get(c.id)||c.rating||{gender:null,age_band:null,scores:{},naturalness:50,excluded:false,pronunciation_issue:false,notes:''};
  $('voice-title').textContent=`Voice ${String(index+1).padStart(3,'0')}`;$('voice-select').value=c.id;$('rated-tag').textContent=c.rating?'Rated':'Not rated';
  for(const t of state.traits)$(t.id).value=v.scores[t.id]??50;
+ for(const category of state.categories)for(const input of document.querySelectorAll(`input[name="${category.id}"]`))input.checked=(v[category.id]===input.value);
  $('naturalness').value=v.naturalness;$('excluded').checked=v.excluded;$('pronunciation-issue').checked=v.pronunciation_issue;$('rating-notes').value=v.notes;
  updateOutputs();$('draft-state').textContent=drafts.has(c.id)?'Unsaved changes':c.rating?`Saved · revision${c.rating.revision}`:'Not saved';
  const audio=$('rating-audio');audio.pause();audio.removeAttribute('src');if(c.media)audio.src=c.media;audio.load();
@@ -38,7 +51,7 @@ async function load(){
  if(drafts.size&&!confirm('Reloading discards your unsaved slider changes. Continue?'))return;
  try{
   const previous=current()?.id;state=await api(fixture?new URL('./rating-fixture.json',location.href).pathname:'/api/ratings');drafts.clear();pending=null;
-  $('trait-sliders').replaceChildren(...state.traits.map(slider));selectOptions();
+  $('trait-sliders').replaceChildren(...state.traits.map(slider));$('categories').replaceChildren(...state.categories.map(categoryField));selectOptions();
   const available=state.candidates.length>0;$('rating-workbench').hidden=!available;$('empty').hidden=available;progress();
   if(available){let next=state.candidates.findIndex(c=>c.id===previous);if(next<0)next=state.candidates.findIndex(c=>!c.rating);display(next<0?0:next);}
   notice(fixture?'Synthetic review fixture. Saving is disabled.':'');
@@ -53,6 +66,8 @@ $('refresh').addEventListener('click',load);$('empty-refresh').addEventListener(
 $('rating-form').addEventListener('submit',async event=>{
  event.preventDefault();if(busy||fixture||!current())return;
  const c=current(),payload={bank:state.bank,audio_sha256:c.audio_sha256,expected_revision:c.rating?.revision||0,...values()},signature=JSON.stringify(payload);
+ const missing=state.categories.filter(category=>!payload[category.id]);
+ if(missing.length){notice('Choose a value for '+missing.map(category=>category.label).join(' and ')+'. Use Unclear if you cannot tell.',true);return;}
  if(!pending||pending.signature!==signature)pending={signature,body:{...payload,operation_id:operationId()}};
  const stay=event.submitter?.value==='stay';setBusy(true);
  try{
