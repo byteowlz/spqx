@@ -14,6 +14,28 @@ Generated speech has not received an independent listening/ASR quality review. C
 
 ## Build
 
+Acceleration is chosen, not guessed. `scripts/accel-env.sh` resolves one
+accelerator (`auto`, `mlx`, `cpu`, `cuda`, `vulkan`, `metal`, `tch`) into the
+Cargo feature set, device and CUDA architecture a command should use; `auto` is
+MLX on Apple Silicon, CUDA when an NVIDIA device is present, otherwise CPU. A
+unsupported target configuration exits instead of building another engine.
+Explicit GGML targets can be cross-built without a local device (a warning is
+reported); this never proves inference availability. `just accel [accel]` prints
+the resolution without building anything. `SPQX_ACCEL` supplies the default and
+an explicit recipe argument overrides it. CUDA architecture overrides are retained.
+
+`just install mlx` keeps its Cargo target directory for metallib staging. Multiple
+candidate metallibs must be byte-identical, otherwise staging fails and requires
+an explicit `SPQX_METALLIB` producer artifact. A supplied GGML runtime is checked
+before replacing binaries; legacy `tch` installs do not require a GGML runtime.
+
+```sh
+just accel mlx
+just build-release mlx
+```
+
+Portable/model-free work never allocates an accelerator.
+
 ```sh
 just check-portable
 just test-portable

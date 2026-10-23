@@ -100,10 +100,36 @@ toolchain.
 
 ## Build
 
+The `justfile` picks the accelerator for you or takes one explicitly (`auto`,
+`mlx`, `cpu`, `cuda`, `vulkan`, `metal`, `tch`; `SPQX_ACCEL` sets the default).
+On Apple Silicon `auto` means MLX, on an NVIDIA host CUDA, otherwise CPU. A
+unsupported target configuration fails instead of building another engine. Explicit
+GGML targets may be cross-built without a local device; a successful build is not
+proof that this host can run inference.
+
 ```bash
-git submodule update --init --recursive
-cargo build --release -p spqx-core --no-default-features --features mlx --bin spqx-tts-worker
+just accel              # show the accelerator and features that would be used
+git submodule update --init --recursive   # mlx-c, needed for MLX builds
+just build mlx          # debug build
+just build-release mlx  # release build
+just install mlx        # cargo install plus the compiled mlx.metallib beside it
 ```
+
+`just install` never touches configuration, voices, models or recordings. GGML
+builds additionally need `SPQX_RUNTIME` pointing at a directory built by
+`just runtime`, so it can copy the libqwen libraries into `<cargo-bin>/lib`.
+
+```bash
+just runtime cpu target/spqx-runtime-cpu
+SPQX_RUNTIME=target/spqx-runtime-cpu just install cpu
+```
+
+A finished redistributable is still built by `just bundle` (see
+[release bundles](docs/portable-engines.md)); `just install` is the developer
+path and does not produce a bundle. Metallib staging accepts multiple build outputs
+only when their bytes agree; if they differ, set `SPQX_METALLIB` to the intended
+compiled artifact rather than selecting one by timestamp. `just test-dev-tools`
+checks feature routing and staging using fake tools, without installs or inference.
 
 ## Usage
 

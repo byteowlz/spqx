@@ -14,8 +14,18 @@ Read `CONTEXT.md` and `docs/adr/` before changing engine boundaries. Current CLI
 
 ## Commands
 
+The `justfile` selects the accelerator (`auto`, `mlx`, `cpu`, `cuda`, `vulkan`,
+`metal`, `tch`) via `scripts/accel-env.sh`; `auto` is MLX on Apple Silicon, CUDA
+on an NVIDIA host, otherwise CPU. Unsupported target configurations fail closed;
+named GGML targets can be cross-built without a local device, with a warning.
+Do not interpret compilation as runtime device qualification or silently build a
+different engine. Explicit recipe arguments override SPQX_ACCEL.
+
+- `just accel [accel]`: print the accelerator and Cargo features a recipe would use.
 - `just check-portable test-portable`: model-free contract/config/stdout tests; no inference.
 - `just test-native-cpu`: ignored acceptance with explicit local runtime, weights and lawful references. Read its environment contract before running.
+- `just install mlx`: `cargo install` for both crates plus `scripts/stage-metallib.sh`, which copies the exact compiled `mlx.metallib` beside the installed binaries. Never replace this with a bare `cargo install --features mlx`; MLX loads the metallib from its own binary directory, so that install produces a broken binary.
+- `just install cpu|cuda`: needs `SPQX_RUNTIME` (from `just runtime`) to place libqwen in `<cargo-bin>/lib`.
 - Metal model tests require fresh accepted compute admission. Never stop unrelated workloads or edit service/launchd configuration to make room.
 - `uv run --no-project scripts/test_package.py`: bundle integrity tests.
 
