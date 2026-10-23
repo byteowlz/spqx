@@ -1,0 +1,11 @@
+check:
+    cargo check --locked
+
+test:
+    cargo test --locked --lib
+
+build:
+    cargo build --locked
+
+fmt:
+    cargo fmt --check
