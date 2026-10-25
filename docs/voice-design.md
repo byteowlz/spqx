@@ -1,6 +1,6 @@
 # Native VoiceDesign
 
-`spqx design` generates a new described voice, without a reference recording or a preset speaker. It runs on the existing engines: the whole-pipeline GGML/libqwen runtime and native MLX, never a Python SDK adapter. The model stays loaded across calls to `synthesis::Session`; the CLI is a single-candidate process.
+`spqx design` generates a new described voice, without a reference recording or a preset speaker. It runs on the existing engines: the whole-pipeline GGML/libqwen runtime and native MLX, never a Python SDK adapter. The model stays loaded across calls to `synthesis::Session`; the CLI writes at most one completed candidate per process.
 
 ## Use
 
@@ -19,7 +19,7 @@ spqx --backend ggml --device cuda:0 --config config.toml --json design \
   --language german --seed 4242 --out candidate.wav > candidate.json
 ```
 
-For custom/local assets, set `model.path` to the VoiceDesign GGUF file and `engine.codec` to its codec. Set `engine.library` only when not using the matching bundled runtime. Output is native 24 kHz mono PCM16 WAV; other configured sample rates are rejected rather than silently resampling candidates. No denoising, trimming or regeneration is performed. Existing output files are not overwritten, including files created while inference is running. No live playback is started.
+For custom/local assets, set `model.design_path` to the VoiceDesign GGUF file and `engine.codec` to its codec. Set `engine.library` only when not using the matching bundled runtime. Output is native 24 kHz mono PCM16 WAV; other configured sample rates are rejected rather than silently resampling candidates. No denoising, trimming or regeneration of an explicit seeded attempt is performed. Unseeded attempts follow the bounded retry policy below. Existing output files are not overwritten, including files created while inference is running. No live playback is started.
 
 The JSON records the description, spoken text, language, seed, model path, selected backend and timing boundaries. Keep the exact WAV with this recipe and independently recorded model/runtime hashes. A seed is not a portable voice identity or a guarantee across engines/devices. Saving a candidate does not promote a registry voice or enroll recognition.
 
@@ -56,18 +56,26 @@ Fresh non-evicting 5 GiB leases were released after each run. The final guard sa
 
 CUDA VoiceDesign is the verified GGML target; CPU, Windows, Vulkan and GGML Metal are not qualified by these results.
 
-Native MLX VoiceDesign was executed on an Apple Silicon M2 Ultra (macOS 15.7.9) against that pinned snapshot. A loaded description session prepared in 0.52 s; the first decoded PCM arrived 0.14-0.23 s after preparation and complete generation took 1.6-2.0 s for 4.7-6.0 s of audio with EOS. The loaded-session contract passed: Base-as-VoiceDesign rejected, pre-cancel, callback cancel, two-frame cap, malformed `NUL` text and full EOS recovery, plus an identical seeded replay from the same session. A fixed German sentence across eight seeds produced six complete candidates (4.08-4.96 s) whose large-v3-turbo ASR matched the target text exactly, and two rejected attempts. Two seeds rendered in the non-streaming text layout instead ran into the cap at 18.2 s with the speech ending after ~2 s (RMS -83 to -96 dBFS afterwards), which is why the streaming text layout is the implemented one.
+Development-build native MLX VoiceDesign was executed on an Apple Silicon M2 Ultra (macOS 15.7.9) against that pinned snapshot. A loaded description session prepared in 0.52 s. Its first cold/JIT candidate reached decoded PCM after 5.52 s; subsequent retained-session callbacks arrived in 0.14-0.23 s, with generation taking 1.6-2.0 s for 4.7-6.0 s of audio. Those warm measurements are not cold-process latency or exact-final-source acceptance. The loaded-session contract passed: Base-as-VoiceDesign rejected, pre-cancel, callback cancel, two-frame cap, malformed `NUL` text and full EOS recovery, plus an identical seeded replay from the same session. A fixed German sentence across eight seeds produced six complete candidates (4.08-4.96 s) whose large-v3-turbo ASR matched the target text exactly, and two rejected attempts. Two seeds rendered in the non-streaming text layout instead ran into the cap at 18.2 s with the speech ending after ~2 s (RMS -83 to -96 dBFS afterwards), which is why the streaming text layout is the implemented one.
 
 The VoiceDesign token layout, seed-key behaviour and checkpoint/language/text validation are covered model-free. Voice Lab integration, canonical promotion and native PCA are separate feature work, not delivered by this CLI/API slice.
 
 ## Main integration validation (2026-10-21)
 
-The source landing preserves both `design` and `models download`. The integrated model-free suite passed 33 tests (3 explicit native/MLX cases ignored), and portable core/CLI `cargo check` passed. A new CLI regression checks both commands and rejects missing VoiceDesign `model.path` before creating a Base cache or candidate WAV, with clean JSON stdout. No new inference or MLX VoiceDesign parity is claimed by this landing.
+The source landing preserves both `design` and `models download`. The integrated model-free suite passed 33 tests (3 explicit native/MLX cases ignored), and portable core/CLI `cargo check` passed. At that initial landing, before operation-aware design profiles, a CLI regression checked both commands and rejected a missing explicit VoiceDesign path before creating a Base cache or candidate WAV, with clean JSON stdout. The compatible automatic-acquisition policy above supersedes that historical guard. No new inference or MLX VoiceDesign parity is claimed by this landing.
 
 Structural review reported zero gating regressions: seven static dead-code findings on test functions/modules, three minor churn findings and one 61-line native acceptance-test verbosity finding. These were reviewed, not treated as a clean absence of findings; the self-contained ignored acceptance retains its separate actual CUDA evidence above. Static caller coverage is incomplete across subprocess/FFI tests.
 
 This VoiceDesign proof does not qualify PCA or canonical saving. Frozen Base-model PCA and canonical saving are a separate, separately qualified native GGML feature described in [frozen voices](frozen-voices.md); SDK and native banks are not interchangeable.
 
+
+## Exact-source rerun (2026-10-25)
+
+The release core acceptance test and CLI were rebuilt from main `008a259864df58f752e1740b9791d45594fc0834`, with an exact staged metallib, binary/source SHA256 manifest and fresh private output. The wrapper directory bug was fixed and three model-free wrapper regressions passed. A fresh accepted 8 GiB local lease was explicitly released after the test.
+
+**The opt-in test failed; full acceptance remains open (`spqx-kne3`).** The first German text completed EOS with 5.360 s audio: preparation 0.367 s, first decoded PCM 0.501 s after preparation, completion 1.901 s. Wrong-model rejection, pre-cancel, active callback cancellation, the two-frame cap and malformed-NUL rejection passed. Its subsequent seeded replay was byte-identical (first PCM 0.219 s, completion 4.464 s). The second seeded text hit `CapReached` and no incomplete WAV was saved. These are single-run observations, not a benchmark or acoustic approval.
+
+This was actual committed-code inference, unlike the earlier output-directory failure before model loading. It is not a passing whole contract, second-host proof, current-CLI synthesis or PCA qualification. No cap inflation, seed/text substitution, trimming or weakened test was used to turn the failure green. Preserve the failed receipt and add explicit rejection/CLI coverage when investigating the remaining fixture failure.
 
 ## Reproduce
 
@@ -76,6 +84,8 @@ This VoiceDesign proof does not qualify PCA or canonical saving. Frozen Base-mod
 - `SPQX_DESIGN_ASSETS`: directory containing the pinned VoiceDesign talker, codec and a hash-checked Base talker named `base.gguf` for the negative case.
 - `SPQX_DESIGN_LIBRARY`: matching trusted native library.
 - `SPQX_DESIGN_DEVICE`: explicitly selected device, such as `cuda:0`.
-- `SPQX_DESIGN_OUTPUT`: fresh private output directory.
+- `SPQX_DESIGN_OUTPUT`: an absolute private output **leaf that does not exist**; create its parent only. The Rust test owns leaf creation and refuses reuse.
+
+For MLX, also set `SPQX_DESIGN_BACKEND=mlx`; `SPQX_DESIGN_ASSETS` is the pinned VoiceDesign snapshot directory, and `SPQX_DESIGN_WRONG` is a Base snapshot/config directory. GGML library/device variables are not used in this mode. Bind the exact compiled test/CLI/metallib hashes and source revision; do not reuse a historically staged executable and call it current.
 
 At the original feature validation on 2026-10-20, local default MLX compilation was blocked by a missing Apple Metal Toolchain, after initializing the pinned submodule; portable checks and actual Linux builds passed. This is historical evidence, not a claim about current toolchain availability. No global SDK/toolchain installation was attempted. Scope remains `spqx-kazg.13.3` above `spqx-srtg.1`; broader registry/UI work remains open.

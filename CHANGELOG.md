@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Correct VoiceDesign's manual checkpoint configuration to `model.design_path` and distinguish historical warm development timings from cold/final-source proof. Record the fresh exact-source MLX rerun honestly: first EOS/replay/interruption checks passed, second seeded text hit the cap unsaved, whole acceptance remains open. The private output leaf must not already exist.
+
 - Honor `SPQX_ACCEL` defaults and explicit command overrides in developer recipes; retain CUDA architecture overrides, keep `cargo install` outputs for metallib staging, reject ambiguous incompatible metallibs instead of mtime guessing, and validate supplied GGML runtimes before replacing commands. Add model-free fake-tool routing/install/staging regressions.
 
 - Add blind manual voice-calibration ratings to the experimental Voice Lab: six traits, voice presentation and age band as discrete judgements with an explicit Unclear (never a slider), separate naturalness/flags/notes, exact audition bindings, explicit atomic saves, stale-tab protection and idempotent retries. Optional `rating_bank` config; existing native preview/save behavior and keyless Host/Origin policy retained. Ratings saved before the categories existed stay valid and byte-identical, load as `categories_pending`, and are rewritten only when a person explicitly completes them; earlier scores and naturalness are never defaulted. Private100-candidate vector-only bank technically verified; semantic controls, human acoustic acceptance and retro-console work remain unqualified. See `docs/voice-calibration.md`.
