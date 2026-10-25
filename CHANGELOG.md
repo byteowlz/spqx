@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Execute the isolated GPUI/Objective-C synthetic handoff probe in an ad-hoc hardened macOS bundle with strict signature verification and no extra entitlements. Document its receipt and reproduction separately from unproved OS Services routing, Developer ID/notarization, signed MLX product packaging and cross-platform GUI execution.
+
 - Correct VoiceDesign's manual checkpoint configuration to `model.design_path` and distinguish historical warm development timings from cold/final-source proof. Record the fresh exact-source MLX rerun honestly: first EOS/replay/interruption checks passed, second seeded text hit the cap unsaved, whole acceptance remains open. The private output leaf must not already exist.
 
 - Honor `SPQX_ACCEL` defaults and explicit command overrides in developer recipes; retain CUDA architecture overrides, keep `cargo install` outputs for metallib staging, reject ambiguous incompatible metallibs instead of mtime guessing, and validate supplied GGML runtimes before replacing commands. Add model-free fake-tool routing/install/staging regressions.

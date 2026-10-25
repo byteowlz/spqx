@@ -49,6 +49,7 @@ Success is a useful terminal-free path from voice/text to audio without becoming
 - Existing experimental Studio `spqx-voice-lab-r3` and native frozen-PCA feature-branch contracts. Browser screenshots are not native acceptance or acoustic approval.
 - Local research report: `~/.local/share/spqx/gui-research/REPORT.md`, tracked by spqx-9ttq; follow-on work spqx-1we0.
 - User confirmation on 2026-10-21: personal-first audience; all three desktop operating systems in initial scope.
+- [Executed native feasibility probe](experiments/gpui-services/proof.md), 2026-10-25: ad-hoc hardened `.app`, strict signature verification, native application loop and one owned Unicode handoff passed without extra entitlements. Not OS Services routing, Developer ID/notarization or a signed MLX product bundle.
 
 ## Product Principles
 

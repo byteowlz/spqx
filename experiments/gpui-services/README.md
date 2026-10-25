@@ -20,6 +20,8 @@ The callback does not block or replace a queued request. Empty, invalid UTF-8,
 NUL-containing, oversized and busy requests fail explicitly. Production input
 validation, playback/controller/worker integration and cancellation are separate.
 
+The [2026-10-25 proof](proof.md) executed this native handoff in an ad-hoc
+hardened `.app` with strict signature verification and no extra entitlements.
 This does NOT establish Services-menu routing from another app, launch-on-demand,
 screen-reader accessibility, actual rendering fidelity or Developer ID notarization.
 No signing identity, permission or service registration beyond this process is changed.
