@@ -51,9 +51,13 @@ GET `/health` and `/api/state` need no credentials. Every write requires the exa
 
 Set `rating_bank = "/private/voice-bank"` (or `--rating-bank`) and open `/ratings` for blind six-trait ratings, two discrete judgements (voice presentation and age band, each with an explicit Unclear) and separate naturalness, exclusion and notes. Save explicitly; no generation, machine labels, training or registry promotion. `GET /api/ratings` and `POST /api/ratings/cNNN` share the versioned files, exact-audio bindings, revision checks and retry ids. Source prompts are not exposed. See [calibration contract](../../docs/voice-calibration.md) and [request schema](rating-request.schema.json).
 
+## Keep / reject audition curation
+
+Set `curation_bank` (or `--curation-bank`) to a separate completed frozen-audition bank and open `/curation`. Individual playback, keep/reject/unsure, optional notes and explicit Save share a revisioned file-backed API/CLI. No mandatory scores, implicit midpoint, inference, registry promotion or old-rating migration. See [curation contract and checks](CURATION.md).
+
 ## Proof and visual status
 
-`just test` runs 32 tests/163 assertions including effective-vector custody, lossless native numeric documents, explicit canonical save/retry, media protections, single-flight and incompatible provider/admission failures. `just check` builds the Bun server.
+`just test` covers effective-vector custody, lossless native numeric documents, explicit canonical save/retry, media protections, single-flight, incompatible provider/admission failures and separate audition curation. `just check` builds the Bun server; `just curation-check` and `just curation-browser-check` provide scoped model-free curation proof.
 
 `VOICE_LAB_URL=http://127.0.0.1:8805 just frozen-browser-check` intentionally requires a fresh isolated native test service/registry. It performs one admitted real render, keyboard PCA edits, an in-flight change, browser decode/playback-clock checks, exact canonical save/retry/reopen, Range206 and Origin denial. Do not run it against user data. `scripts/capture.ts` captures only read-only synthetic visual fixtures.
 

@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile, rename, realpath, readdir } from 'node:fs/p
 import { join, resolve, sep } from 'node:path';
 import { captureConditioning } from './frozen';
 import { RatingError, type RatingBank } from './ratings';
+import { CurationError, type CurationBank } from './curation';
 
 export class LabError extends Error {
   constructor(public code: string, message: string, public status = 400) { super(message); }
@@ -45,7 +46,7 @@ async function atomic(path: string, value: unknown) {
 }
 export function createApp(options: {
   origin: string; data: string; info: any; publicDir: string;
-  media: Map<string,string>; allowedRoots: string[]; maxDaily: number; recipeFiles?: Record<string,string>; ratings?: RatingBank;
+  media: Map<string,string>; allowedRoots: string[]; maxDaily: number; recipeFiles?: Record<string,string>; ratings?: RatingBank; curation?: CurationBank;
   render: (recipe: Recipe, id: string, admitted: () => Promise<void>) => Promise<Result>;
   promote?: (directory:string,name:string,operationId:string)=>Promise<string>;
 }) {
@@ -167,11 +168,12 @@ export function createApp(options: {
       try{path=await realpath(join(options.data,'drafts',id.slice(6),'reference.wav'));}catch(error:any){if(error.code!=='ENOENT')throw error;}
     }
     if(!path && id.startsWith('rating-') && options.ratings)path=await options.ratings.audio(id.slice(7));
+    if(!path && id.startsWith('curation-') && options.curation)path=await options.curation.audio(id.slice(9));
     if(!path) return json({error:'not_found'},404);
     const resolved=await realpath(path);
     if(!allowedRoots.some(root=>resolved.startsWith(root+sep))) return json({error:'media_denied'},403);
     const file=Bun.file(resolved),size=file.size,range=req.headers.get('range');
-    const contentType=id.startsWith('rating-')?'audio/mp4':'audio/wav';
+    const contentType=id.startsWith('rating-')||id.startsWith('curation-')?'audio/mp4':'audio/wav';
     if(!range)return new Response(file,{headers:{...headers,'Content-Type':contentType,'Accept-Ranges':'bytes'}});
     const match=/^bytes=(\d+)-(\d*)$/.exec(range);
     if(!match)return new Response(null,{status:416,headers:{...headers,'Content-Range':`bytes */${size}`}});
@@ -185,6 +187,12 @@ export function createApp(options: {
       if(req.headers.get('host')!==new URL(options.origin).host) return json({error:'host_denied'},421);
       const url=new URL(req.url),path=url.pathname;
       if(req.method==='GET' && path==='/health')return json({app:'spqx-voice-lab',status:'up',experimental:true});
+      if(req.method==='GET' && path==='/api/curation')return options.curation?json(await options.curation.state()):json({error:'curation_unavailable',message:'No curation bank is configured.'},503);
+      if(req.method==='POST' && /^\/api\/curation\/c\d{3}$/.test(path)){
+        writeGuard(req);const value=await body(req);
+        if(!options.curation)throw new LabError('curation_unavailable','No curation bank is configured.',503);
+        return json(await options.curation.save(path.split('/').pop()!,value),201);
+      }
       if(req.method==='GET' && path==='/api/ratings')return options.ratings?json(await options.ratings.state()):json({error:'ratings_unavailable',message:'No audition bank is configured. Voice shaping is still available.'},503);
       if(req.method==='POST' && /^\/api\/ratings\/c\d{3}$/.test(path)){
         writeGuard(req);const value=await body(req);
@@ -208,9 +216,9 @@ export function createApp(options: {
         saving=true;try{return json(await (path==='/api/voices'?saveReusable(value):saveDraft(value)),201);}finally{saving=false;}
       }
       if(req.method==='GET' && /^\/media\/[a-zA-Z0-9-]+$/.test(path))return await media(req,path.slice(7));
-      const staticFiles:Record<string,string>={'/':'index.html','/index.html':'index.html','/app.js':'app.js','/styles.css':'styles.css','/tokens.css':'tokens.css','/fixture.json':'fixture.json','/ratings':'ratings.html','/ratings.html':'ratings.html','/ratings.js':'ratings.js','/ratings.css':'ratings.css','/rating-fixture.json':'rating-fixture.json'};
+      const staticFiles:Record<string,string>={'/':'index.html','/index.html':'index.html','/app.js':'app.js','/styles.css':'styles.css','/tokens.css':'tokens.css','/fixture.json':'fixture.json','/ratings':'ratings.html','/ratings.html':'ratings.html','/ratings.js':'ratings.js','/ratings.css':'ratings.css','/rating-fixture.json':'rating-fixture.json','/curation':'curation.html','/curation.html':'curation.html','/curation.js':'curation.js','/curation.css':'curation.css','/curation-palette.css':'curation-palette.css'};
       if(req.method==='GET' && staticFiles[path])return new Response(Bun.file(join(options.publicDir,staticFiles[path])),{headers});
       return json({error:'not_found'},404);
-    } catch(error) {const known=error instanceof LabError||error instanceof RatingError;return json({error:known?error.code:'internal_error',message:known?error.message:'The request failed safely.'},known?error.status:500);}
+    } catch(error) {const known=error instanceof LabError||error instanceof RatingError||error instanceof CurationError;return json({error:known?error.code:'internal_error',message:known?error.message:'The request failed safely.'},known?error.status:500);}
   };
 }

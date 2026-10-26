@@ -17,6 +17,14 @@ browser-check:
 ratings-browser-check:
     bun scripts/ratings-browser-check.ts
 
+# Isolated synthetic curation state/media; never writes real reviews or infers.
+curation-browser-check:
+    bun scripts/curation-browser-check.ts
+
+curation-check:
+    bun test curation.test.ts
+    bun build server.ts --target=bun --outdir /tmp/spqx-curation-check
+
 # Fresh isolated native fixture/registry only; spends one admitted preview.
 frozen-browser-check:
     bun scripts/frozen-browser-check.ts

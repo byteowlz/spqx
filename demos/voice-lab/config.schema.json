@@ -23,6 +23,7 @@
     "native_config": {"type":"string","description":"Explicit spqx config selecting pinned Base GGUF/codec/runtime/device."},
     "native_registry": {"type":"string","description":"Canonical voqx registry root override; otherwise native CLI uses XDG voice-registry."},
     "rating_bank": {"type":"string","description":"Private version1 vector-only audition bank. Enables manual ratings, not synthesis or canonical saving."},
+    "curation_bank": {"type":"string","description":"Separate SHA-bound frozen audition bank for explicit keep/reject/unsure reviews at /curation. No inference, numeric default scores or enrollment."},
     "python": {
       "type": "string",
       "description": "Existing SDK environment Python, invoked via uv."

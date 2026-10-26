@@ -1,0 +1,68 @@
+import { chromium } from '@playwright/test';
+import { mkdir, rm, writeFile, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { curationFixture } from '../curation-fixture';
+import { CurationBank } from '../curation';
+import { createApp } from '../core';
+
+const fixture=await curationFixture(),bank=new CurationBank(fixture.root),output=process.env.CURATION_PROOF_DIR||'/tmp/spqx-curation-browser';
+await mkdir(output,{recursive:true});
+let handler:(req:Request)=>Promise<Response>,renderCalls=0;
+const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch:req=>handler(req)}),origin=server.url.origin;
+handler=createApp({origin,data:join(fixture.root,'app'),info:{},publicDir:join(import.meta.dir,'../public'),media:new Map(),allowedRoots:[fixture.root],maxDaily:1,curation:bank,render:async()=>{renderCalls++;throw new Error('No inference allowed');}});
+const browser=await chromium.launch({headless:true,args:['--disable-gpu'],executablePath:join(process.env.HOME!,'Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing')});
+const checks:string[]=[],errors:string[]=[];
+const check=(condition:unknown,name:string)=>{if(!condition)throw new Error(name);checks.push(name);};
+try {
+ const page=await browser.newPage({viewport:{width:1280,height:1000},colorScheme:'light'});
+ page.on('pageerror',error=>errors.push(error.message));
+ await page.goto(origin+'/curation');await page.getByText('0 of 2 reviewed',{exact:true}).waitFor();
+ check(await page.locator('input[type=radio]:checked').count()===0,'No initial decision or midpoint');
+ check(await page.locator('#save').isDisabled(),'No empty implicit save');
+ await page.locator('#audio').click({position:{x:22,y:25}});await page.waitForFunction(()=>!document.querySelector<HTMLAudioElement>('#audio')!.paused);
+ check(await page.locator('#audio').evaluate((a:HTMLAudioElement)=>a.duration)>2.9,'Actual playable audio metadata');
+ await page.getByRole('radio',{name:'Keep Worth exploring further'}).check();
+ check((await bank.state()).reviewed===0,'Choice change is draft-only');
+ await page.getByRole('button',{name:'Save only',exact:true}).click();await page.getByText('Review saved.',{exact:true}).waitFor();
+ check((await bank.state()).candidates[0].review?.decision==='keep','Web Save uses authoritative substrate');
+ await page.reload();await page.getByRole('radio',{name:'Keep Worth exploring further'}).waitFor();
+ check(await page.getByRole('radio',{name:'Keep Worth exploring further'}).isChecked(),'Saved review survives reload');
+ await page.getByRole('radio',{name:'Reject Not useful to me'}).check();
+ page.once('dialog',dialog=>dialog.dismiss());await page.getByRole('button',{name:'Next',exact:true}).click();
+ check(await page.locator('#voice-title').textContent()==='Voice 001','Unsaved navigation cancellation retains target');
+ check(await page.getByRole('radio',{name:'Reject Not useful to me'}).isChecked(),'Unsaved draft retained');
+ let lost=false;
+ await page.route('**/api/curation/c001',async route=>{if(!lost){lost=true;await route.fetch();await route.abort('failed');}else await route.continue();});
+ await page.getByRole('button',{name:'Save only',exact:true}).click();await page.getByRole('button',{name:'Retry Save',exact:true}).waitFor();
+ const written=(await bank.state()).candidates[0].review!;check(written.revision===2&&written.decision==='reject','Lost response preserves actual committed intent');
+ check(await page.getByRole('radio',{name:'Keep Worth exploring further'}).isDisabled()&&await page.locator('#notes').isDisabled()&&await page.locator('#voice-select').isDisabled(),'Uncertain save freezes target and content');
+ await page.getByRole('button',{name:'Retry Save',exact:true}).click();await page.getByText('Review saved.',{exact:true}).waitFor();
+ check((await bank.state()).candidates[0].review?.revision===2,'Retry is idempotent, not a second save');
+ await page.unroute('**/api/curation/c001');
+ await page.locator('#notes').fill('Unsaved browser note');
+ const original=(await bank.state()).candidates[0];
+ await bank.save('c001',{bank:(await bank.state()).bank,audio_sha256:original.audio_sha256,expected_revision:2,operation_id:randomUUID(),decision:'keep',notes:'Agent fixture note'});
+ await page.getByRole('button',{name:'Save only',exact:true}).click();await page.getByText(/This review changed elsewhere/).waitFor();
+ check(await page.locator('#notes').inputValue()==='Unsaved browser note','Stale save preserves local draft');
+ page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'Reload saved reviews'}).click();await page.getByText('Saved reviews reloaded.',{exact:true}).waitFor();
+ check(await page.locator('#notes').inputValue()==='Agent fixture note','Agent write is visible in the open human UI');
+ await page.getByRole('button',{name:'Next',exact:true}).click();
+ check(await page.locator('#voice-title').textContent()==='Voice 002','Candidate switches are explicit');
+ check(await page.locator('#audio').evaluate((a:HTMLAudioElement)=>a.paused),'Changing candidates stops previous playback');
+ await page.getByRole('radio',{name:'Unsure I can’t decide yet'}).focus();await page.keyboard.press('Space');
+ check(await page.getByRole('radio',{name:'Unsure I can’t decide yet'}).isChecked(),'Keyboard uncertainty choice is operable');
+ await page.getByRole('button',{name:'Save & next'}).click();await page.getByText('Review saved. You reached the last audition.',{exact:true}).waitFor();
+ check((await bank.state()).candidates[1].review?.decision==='unsure','Explicit uncertainty is not null or a numeric score');
+ for(const [name,width,height,theme] of [['desktop',1280,1000,'light'],['phone',390,844,'light'],['desktop-dark',1280,1000,'dark'],['phone-dark',390,844,'dark']] as const){
+  await page.setViewportSize({width,height});await page.emulateMedia({colorScheme:theme});await page.reload();await page.getByText('2 of 2 reviewed',{exact:true}).waitFor();
+  check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),name+' has no horizontal overflow');
+  const tiny=await page.locator('button:not([hidden]),select,textarea,.choice').evaluateAll(nodes=>nodes.filter((n:any)=>n.getBoundingClientRect().width>0&&n.getBoundingClientRect().height<40).map((n:any)=>({id:n.id,height:n.getBoundingClientRect().height})));
+  check(tiny.length===0,name+' controls have usable target height');
+  await page.screenshot({path:join(output,name+'.png'),fullPage:true});
+ }
+ await page.setViewportSize({width:320,height:800});check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'320px geometry');
+ check(renderCalls===0,'No inference path used');check(errors.length===0,'No browser script errors');
+ await writeFile(join(output,'proof.json'),JSON.stringify({scope:'Actual isolated synthetic-tone browser/API state; not real reviews, human acoustic acceptance or physical phone',checks,errors,renderCalls,source:'demos/voice-lab/scripts/curation-browser-check.ts'},null,2)+'\n');
+ console.log(JSON.stringify({checks:checks.length,output,errors}));
+}finally{await browser.close();server.stop(true);await rm(fixture.root,{recursive:true,force:true});}

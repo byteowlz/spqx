@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en" data-scheme="oqto-light">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Explore voices · Voice Lab</title><link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="curation-palette.css"><link rel="stylesheet" href="curation.css"><script src="curation.js" defer></script></head>
+<body>
+<header class="top"><a class="wordmark" href="./">Voice Lab<span class="mark" aria-hidden="true"></span></a><span class="muted">Voice exploration</span><a class="quiet" href="ratings">Voice calibration</a></header>
+<main>
+<div class="intro"><div><h1>Listen. Keep. Explore.</h1><p>Find the voices worth keeping. No trait scoring required.</p></div><div class="space-meta"><strong id="progress">Loading your auditions…</strong><span id="counts">Your saved reviews will appear here.</span></div></div>
+<p id="notice" role="status" aria-live="polite"></p>
+<div class="workbench" id="workbench" hidden>
+<section class="controls" aria-labelledby="voice-title">
+<div class="section-heading"><h2 id="voice-title" tabindex="-1">Voice</h2><span id="review-tag" class="tag">Unreviewed</span></div>
+<label for="voice-select" class="small">Choose an audition</label><select id="voice-select"></select>
+<audio id="audio" controls preload="metadata" aria-label="Current voice audition"></audio>
+<p id="audio-info" class="small muted"></p>
+<details class="readout"><summary>Read the audition text</summary><p id="audition-text" lang="de"></p><p class="small muted">Same words. Same seed. Candidate groups are hidden while you listen.</p></details>
+<div class="nav"><button id="previous" type="button">Previous</button><button id="next" type="button">Next</button></div>
+<button id="unreviewed" class="quiet" type="button">Next unreviewed voice</button>
+</section>
+<section class="audition" aria-labelledby="review-title">
+<div class="section-heading"><h2 id="review-title">Would you keep it?</h2><span id="draft-state" class="small muted">No decision yet</span></div>
+<form id="review-form">
+<fieldset id="fields"><legend class="sr-only">Your review of this exact audition</legend>
+<div class="choices">
+<label class="choice"><input type="radio" name="decision" value="keep"><span><strong>Keep</strong><span>Worth exploring further</span></span></label>
+<label class="choice"><input type="radio" name="decision" value="reject"><span><strong>Reject</strong><span>Not useful to me</span></span></label>
+<label class="choice"><input type="radio" name="decision" value="unsure"><span><strong>Unsure</strong><span>I can’t decide yet</span></span></label>
+</div>
+<button id="clear" type="button" class="quiet">Clear decision</button>
+<label for="notes">Notes <span class="muted">(optional)</span></label>
+<textarea id="notes" rows="4" maxlength="600" placeholder="What stands out, or what makes it unusable?"></textarea>
+</fieldset>
+<div class="actions"><button id="save-next" type="submit" value="next" class="primary" disabled>Save &amp; next</button><button id="save" type="submit" value="stay" disabled>Save only</button></div>
+<p class="small muted">Nothing is recorded until you save. Keep does not enroll a voice or change its audio.</p>
+</form>
+<div class="review-tools"><button id="refresh" class="quiet" type="button">Reload saved reviews</button><a id="export" href="/api/curation" target="_blank" rel="noopener">View saved JSON</a></div>
+</section>
+</div>
+<div id="unavailable" hidden><h2>Auditions couldn’t be loaded.</h2><p>Your saved reviews have not been changed.</p><button id="retry" type="button">Try again</button></div>
+</main></body></html>
