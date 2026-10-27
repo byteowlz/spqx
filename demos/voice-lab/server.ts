@@ -8,6 +8,7 @@ import { createApp, LabError, type Recipe } from './core';
 import { NativeRenderer } from './native-renderer';
 import { RatingBank } from './ratings';
 import { CurationBank } from './curation';
+import { CurationCatalog } from './curation-catalog';
 
 const here=import.meta.dir;
 const args=parseArgs({args:Bun.argv.slice(2),options:{config:{type:'string'},host:{type:'string'},port:{type:'string'},profile:{type:'string'},python:{type:'string'},data:{type:'string'},provider:{type:'string'},'native-cli':{type:'string'},'native-config':{type:'string'},'native-registry':{type:'string'},'rating-bank':{type:'string'},'curation-bank':{type:'string'},'enable-preview':{type:'boolean'}}}).values;
@@ -82,8 +83,12 @@ const ratings=ratingRoot?new RatingBank(ratingRoot):undefined;
 if(ratings)await ratings.state(); // Invalid configured banks fail startup; no silent substitute.
 const curationRoot=cfg.curation_bank?resolve(String(cfg.curation_bank)):undefined;
 const curation=curationRoot?new CurationBank(curationRoot):undefined;
-if(curation)await curation.state();
-const handler=createApp({origin,data,info,publicDir:join(here,'public'),media,ratings,curation,allowedRoots:[profile,sourceRoot,data,...(ratingRoot?[ratingRoot]:[]),...(curationRoot?[curationRoot]:[])],maxDaily:Number(cfg.max_daily),render,promote:native?promote:undefined,recipeFiles:{'basis.npz':join(profile,'basis.npz'),'conditioning.safetensors':join(profile,'conditioning.safetensors')}});
+const extra=cfg.curation_banks??{};
+if(!extra||typeof extra!=='object'||Array.isArray(extra)||Object.keys(extra).length>8||Object.values(extra).some(v=>typeof v!=='string'||!v))throw new Error('curation_banks must map at most8 short bank keys to private directories.');
+const extraRoots=Object.fromEntries(Object.entries(extra).map(([k,v])=>[k,resolve(String(v))]));
+const curationCatalog=new CurationCatalog(curation,new Map(Object.entries(extraRoots).map(([k,v])=>[k,new CurationBank(v)])));
+if(curation||Object.keys(extraRoots).length)await curationCatalog.state();
+const handler=createApp({origin,data,info,publicDir:join(here,'public'),media,ratings,curation,curationCatalog,allowedRoots:[profile,sourceRoot,data,...(ratingRoot?[ratingRoot]:[]),...(curationRoot?[curationRoot]:[]),...Object.values(extraRoots)],maxDaily:Number(cfg.max_daily),render,promote:native?promote:undefined,recipeFiles:{'basis.npz':join(profile,'basis.npz'),'conditioning.safetensors':join(profile,'conditioning.safetensors')}});
 const server=Bun.serve({hostname:host,port,maxRequestBodySize:4096,fetch:handler});
 console.log(`Voice Lab: ${origin} (experimental; trusted-tailnet access, no key)`);
 for(const signal of ['SIGINT','SIGTERM'] as const)process.on(signal,async()=>{server.stop();nativeRenderer?.stop();if(activeChild?.pid){try{process.kill(-activeChild.pid,'SIGTERM');}catch{}}await unlink(lockPath).catch(()=>{});setTimeout(()=>process.exit(0),12000);});

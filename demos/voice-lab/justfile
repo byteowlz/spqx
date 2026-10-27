@@ -22,7 +22,7 @@ curation-browser-check:
     bun scripts/curation-browser-check.ts
 
 curation-check:
-    bun test curation.test.ts
+    bun test curation.test.ts curation-catalog.test.ts
     bun build server.ts --target=bun --outdir /tmp/spqx-curation-check
 
 # Fresh isolated native fixture/registry only; spends one admitted preview.

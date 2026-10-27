@@ -30,10 +30,12 @@ export class CurationBank {
     if(!plain(v)||v.version!==1||typeof v.id!=='string'||v.id.length<1||v.id.length>128||typeof v.text!=='string'||v.text.length>2000||!Array.isArray(v.ready)||v.ready.length<1||v.ready.length>200)throw new CurationError('curation_bank_invalid','No compatible completed audition bank was configured.',503);
     const ready=v.ready.map((c:any)=>{
       if(!plain(c)||!cid(c.id)||!sha(c.audio_sha256)||!sha(c.listening_sha256)||!sha(c.vector_f32_sha256)||!sha(c.conditioning_sha256)||!Number.isFinite(c.seconds)||c.seconds<2||c.seconds>20)throw new CurationError('curation_bank_invalid','An audition lacks exact audio/vector custody.',503);
-      return {id:c.id,seconds:c.seconds,audio_sha256:c.audio_sha256,listening_sha256:c.listening_sha256,vector_f32_sha256:c.vector_f32_sha256,conditioning_sha256:c.conditioning_sha256};
+      const hasSource=c.design_audio_sha256!==undefined||c.design_listening_sha256!==undefined||c.design_seconds!==undefined;
+      if(hasSource&&(!sha(c.design_audio_sha256)||!sha(c.design_listening_sha256)||!Number.isFinite(c.design_seconds)||c.design_seconds<2||c.design_seconds>20))throw new CurationError('curation_bank_invalid','The design comparison lacks exact source custody.',503);
+      return {id:c.id,seconds:c.seconds,audio_sha256:c.audio_sha256,listening_sha256:c.listening_sha256,vector_f32_sha256:c.vector_f32_sha256,conditioning_sha256:c.conditioning_sha256,...(hasSource?{design_audio_sha256:c.design_audio_sha256,design_listening_sha256:c.design_listening_sha256,design_seconds:c.design_seconds}:{})};
     });
     if(new Set(ready.map((c:any)=>c.id)).size!==ready.length)throw new CurationError('curation_bank_invalid','Duplicate audition IDs.',503);
-    return {id:v.id,text:v.text,ready};
+    return {id:v.id,title:typeof v.title==='string'&&v.title.length<=160?v.title:'Voice exploration',text:v.text,ready};
   }
   private async current(id:string):Promise<Review|null>{
     try {
@@ -44,22 +46,36 @@ export class CurationBank {
       return v;
     } catch(error:any){if(error.code==='ENOENT')return null;if(error instanceof CurationError&&error.code==='curation_path_denied')throw error;throw new CurationError('curation_corrupt','A saved review needs operator inspection; it was not replaced.',503);}
   }
+  async summary(){const bank=await this.index();return {bank:bank.id,title:bank.title,count:bank.ready.length};}
   async state(){
     const bank=await this.index();
     const candidates=await Promise.all(bank.ready.map(async(c:any)=>{
       const review=await this.current(c.id);
       if(review&&(review.bank!==bank.id||review.audio_sha256!==c.audio_sha256))throw new CurationError('curation_stale','A saved review belongs to different audio; it was not relabelled.',409);
-      return {...c,media:'/media/curation-'+c.id,review};
+      return {...c,media:'/media/curation-'+c.id,...(c.design_audio_sha256?{source_media:'/media/curation-source-'+c.id}:{}),review};
     }));
-    return {version:1,bank:bank.id,text:bank.text,candidates,reviewed:candidates.filter((c:any)=>c.review?.decision!=null).length};
+    return {version:1,bank:bank.id,title:bank.title,text:bank.text,review_target:'editable',candidates,reviewed:candidates.filter((c:any)=>c.review?.decision!=null).length};
+  }
+  private async target(id:string){
+    if(!cid(id))throw new CurationError('not_found','No such audition.',404);
+    const bank=await this.index(),c=bank.ready.find((c:any)=>c.id===id);
+    if(!c)throw new CurationError('not_found','No such completed audition.',404);
+    return {bank,c};
+  }
+  private async verifiedAsset(id:string,asset:{file:string;sha256:string;code:string}){
+    const path=await this.confined('candidates',id,asset.file);
+    if(hash(await readFile(path))!==asset.sha256)throw new CurationError(asset.code,'This audio changed; it was not served.',409);
+    return path;
   }
   async audio(id:string){
-    if(!cid(id))throw new CurationError('not_found','No such audition.',404);
-    const c=(await this.index()).ready.find((c:any)=>c.id===id);
-    if(!c)throw new CurationError('not_found','No such completed audition.',404);
-    const path=await this.confined('candidates',id,'listening.m4a');
-    if(hash(await readFile(path))!==c.listening_sha256)throw new CurationError('audio_changed','The listening copy changed; it was not served.',409);
-    return path;
+    const {c}=await this.target(id);
+    return this.verifiedAsset(id,{file:'listening.m4a',sha256:c.listening_sha256,code:'audio_changed'});
+  }
+  async sourceAudio(id:string){
+    const {c}=await this.target(id);
+    if(!c.design_audio_sha256)throw new CurationError('not_found','No original design comparison is available.',404);
+    await this.verifiedAsset(id,{file:'reference.wav',sha256:c.design_audio_sha256,code:'source_changed'});
+    return this.verifiedAsset(id,{file:'design-listening.m4a',sha256:c.design_listening_sha256,code:'source_changed'});
   }
   private async checkFrozen(id:string,c:any,text:string){
     if(hash(await readFile(await this.confined('candidates',id,'audition','reference.wav')))!==c.audio_sha256)throw new CurationError('audio_changed','The raw audition changed; no review was saved.',409);
@@ -71,9 +87,7 @@ export class CurationBank {
     if(hash(raw)!==c.vector_f32_sha256)throw new CurationError('conditioning_changed','The effective vector changed; no review was saved.',409);
   }
   async save(id:string,unknown:unknown){
-    if(!cid(id))throw new CurationError('not_found','No such audition.',404);
-    const input=validateReview(unknown),bank=await this.index(),c=bank.ready.find((c:any)=>c.id===id);
-    if(!c)throw new CurationError('not_found','No such completed audition.',404);
+    const input=validateReview(unknown),{bank,c}=await this.target(id);
     if(input.bank!==bank.id||input.audio_sha256!==c.audio_sha256)throw new CurationError('audio_changed','This save targets different bank/audio; reload before saving.',409);
     await this.audio(id);await this.checkFrozen(id,c,bank.text);
     const directory=await this.path('curation-reviews');await mkdir(directory,{recursive:true,mode:0o700});await this.confined('curation-reviews');

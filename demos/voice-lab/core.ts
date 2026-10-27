@@ -4,6 +4,7 @@ import { join, resolve, sep } from 'node:path';
 import { captureConditioning } from './frozen';
 import { RatingError, type RatingBank } from './ratings';
 import { CurationError, type CurationBank } from './curation';
+import { CurationCatalog } from './curation-catalog';
 
 export class LabError extends Error {
   constructor(public code: string, message: string, public status = 400) { super(message); }
@@ -46,10 +47,11 @@ async function atomic(path: string, value: unknown) {
 }
 export function createApp(options: {
   origin: string; data: string; info: any; publicDir: string;
-  media: Map<string,string>; allowedRoots: string[]; maxDaily: number; recipeFiles?: Record<string,string>; ratings?: RatingBank; curation?: CurationBank;
+  media: Map<string,string>; allowedRoots: string[]; maxDaily: number; recipeFiles?: Record<string,string>; ratings?: RatingBank; curation?: CurationBank; curationCatalog?: CurationCatalog;
   render: (recipe: Recipe, id: string, admitted: () => Promise<void>) => Promise<Result>;
   promote?: (directory:string,name:string,operationId:string)=>Promise<string>;
 }) {
+  const curations=options.curationCatalog||new CurationCatalog(options.curation);
   const jobs = new Map<string,Job>();
   let active: string | null = null;
   let saving = false;
@@ -168,7 +170,8 @@ export function createApp(options: {
       try{path=await realpath(join(options.data,'drafts',id.slice(6),'reference.wav'));}catch(error:any){if(error.code!=='ENOENT')throw error;}
     }
     if(!path && id.startsWith('rating-') && options.ratings)path=await options.ratings.audio(id.slice(7));
-    if(!path && id.startsWith('curation-') && options.curation)path=await options.curation.audio(id.slice(9));
+    if(!path && id.startsWith('curation-source-'))path=await curations.select(new URL(req.url).searchParams.get('bank')).bank.sourceAudio(id.slice(16));
+    else if(!path && id.startsWith('curation-'))path=await curations.select(new URL(req.url).searchParams.get('bank')).bank.audio(id.slice(9));
     if(!path) return json({error:'not_found'},404);
     const resolved=await realpath(path);
     if(!allowedRoots.some(root=>resolved.startsWith(root+sep))) return json({error:'media_denied'},403);
@@ -187,11 +190,10 @@ export function createApp(options: {
       if(req.headers.get('host')!==new URL(options.origin).host) return json({error:'host_denied'},421);
       const url=new URL(req.url),path=url.pathname;
       if(req.method==='GET' && path==='/health')return json({app:'spqx-voice-lab',status:'up',experimental:true});
-      if(req.method==='GET' && path==='/api/curation')return options.curation?json(await options.curation.state()):json({error:'curation_unavailable',message:'No curation bank is configured.'},503);
+      if(req.method==='GET' && path==='/api/curation')return json(await curations.state(url.searchParams.get('bank')));
       if(req.method==='POST' && /^\/api\/curation\/c\d{3}$/.test(path)){
         writeGuard(req);const value=await body(req);
-        if(!options.curation)throw new LabError('curation_unavailable','No curation bank is configured.',503);
-        return json(await options.curation.save(path.split('/').pop()!,value),201);
+        return json(await curations.select(url.searchParams.get('bank')).bank.save(path.split('/').pop()!,value),201);
       }
       if(req.method==='GET' && path==='/api/ratings')return options.ratings?json(await options.ratings.state()):json({error:'ratings_unavailable',message:'No audition bank is configured. Voice shaping is still available.'},503);
       if(req.method==='POST' && /^\/api\/ratings\/c\d{3}$/.test(path)){

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Extend the audition reviewer with operator-configured bank selection and separately hash-bound original-design comparison. Bank-qualified state/save/media URLs preserve previous reviews even when candidate IDs repeat. Reviewing stays bound to the editable/Base audition; original-source playback disables Save and keeps its draft. No generation, semantic labels or enrollment is triggered by these controls. Add isolated cross-bank/source-media and browser safety tests.
+
 - Add a separate exact-audition web curation surface at `/curation` within the existing Voice Lab listener: individual playback, keep/reject/unsure, optional notes and explicit Save. API/CLI share atomic revisioned files, exact audio/vector custody, safe retry/reload and prior-revision recovery. No inferred midpoint scores, mandatory traits, generation, enrollment or changes to the existing rating bank. Retain the workbench anatomy with source-pinned neutral material; browser evidence is not native or appearance approval. See `demos/voice-lab/CURATION.md`.
 
 - Execute the isolated GPUI/Objective-C synthetic handoff probe in an ad-hoc hardened macOS bundle with strict signature verification and no extra entitlements. Document its receipt and reproduction separately from unproved OS Services routing, Developer ID/notarization, signed MLX product packaging and cross-platform GUI execution.

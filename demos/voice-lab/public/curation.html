@@ -4,13 +4,15 @@
 <body>
 <header class="top"><a class="wordmark" href="./">Voice Lab<span class="mark" aria-hidden="true"></span></a><span class="muted">Voice exploration</span><a class="quiet" href="ratings">Voice calibration</a></header>
 <main>
-<div class="intro"><div><h1>Listen. Keep. Explore.</h1><p>Find the voices worth keeping. No trait scoring required.</p></div><div class="space-meta"><strong id="progress">Loading your auditions…</strong><span id="counts">Your saved reviews will appear here.</span></div></div>
+<div class="intro"><div><h1>Listen. Keep. Explore.</h1><p>Find the voices worth keeping. No trait scoring required.</p></div><div class="space-meta"><div id="bank-picker" class="bank-picker" hidden><label for="bank-select">Audition bank</label><select id="bank-select"></select></div><strong id="progress">Loading your auditions…</strong><span id="counts">Your saved reviews will appear here.</span></div></div>
 <p id="notice" role="status" aria-live="polite"></p>
 <div class="workbench" id="workbench" hidden>
 <section class="controls" aria-labelledby="voice-title">
 <div class="section-heading"><h2 id="voice-title" tabindex="-1">Voice</h2><span id="review-tag" class="tag">Unreviewed</span></div>
 <label for="voice-select" class="small">Choose an audition</label><select id="voice-select"></select>
+<div id="source-switch" class="variant-switch" role="group" aria-label="Compare voice versions" hidden><button id="variant-base" type="button" aria-pressed="true">Editable voice</button><button id="variant-source" type="button" aria-pressed="false">Original design</button></div>
 <audio id="audio" controls preload="metadata" aria-label="Current voice audition"></audio>
+<p id="variant-note" class="small muted" hidden></p>
 <p id="audio-info" class="small muted"></p>
 <details class="readout"><summary>Read the audition text</summary><p id="audition-text" lang="de"></p><p class="small muted">Same words. Same seed. Candidate groups are hidden while you listen.</p></details>
 <div class="nav"><button id="previous" type="button">Previous</button><button id="next" type="button">Next</button></div>

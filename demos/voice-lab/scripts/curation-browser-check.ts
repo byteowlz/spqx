@@ -4,13 +4,17 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { curationFixture } from '../curation-fixture';
 import { CurationBank } from '../curation';
+import { CurationCatalog } from '../curation-catalog';
+import { addDesignFixture } from '../curation-design-fixture';
 import { createApp } from '../core';
 
 const fixture=await curationFixture(),bank=new CurationBank(fixture.root),output=process.env.CURATION_PROOF_DIR||'/tmp/spqx-curation-browser';
 await mkdir(output,{recursive:true});
+const extra=await curationFixture();await addDesignFixture(extra.root);const characters=new CurationBank(extra.root);
+const catalog=new CurationCatalog(bank,new Map([['characters',characters]]));
 let handler:(req:Request)=>Promise<Response>,renderCalls=0;
 const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch:req=>handler(req)}),origin=server.url.origin;
-handler=createApp({origin,data:join(fixture.root,'app'),info:{},publicDir:join(import.meta.dir,'../public'),media:new Map(),allowedRoots:[fixture.root],maxDaily:1,curation:bank,render:async()=>{renderCalls++;throw new Error('No inference allowed');}});
+handler=createApp({origin,data:join(fixture.root,'app'),info:{},publicDir:join(import.meta.dir,'../public'),media:new Map(),allowedRoots:[fixture.root,extra.root],maxDaily:1,curation:bank,curationCatalog:catalog,render:async()=>{renderCalls++;throw new Error('No inference allowed');}});
 const browser=await chromium.launch({headless:true,args:['--disable-gpu'],executablePath:join(process.env.HOME!,'Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing')});
 const checks:string[]=[],errors:string[]=[];
 const check=(condition:unknown,name:string)=>{if(!condition)throw new Error(name);checks.push(name);};
@@ -33,13 +37,13 @@ try {
  check(await page.locator('#voice-title').textContent()==='Voice 001','Unsaved navigation cancellation retains target');
  check(await page.getByRole('radio',{name:'Reject Not useful to me'}).isChecked(),'Unsaved draft retained');
  let lost=false;
- await page.route('**/api/curation/c001',async route=>{if(!lost){lost=true;await route.fetch();await route.abort('failed');}else await route.continue();});
+ await page.route('**/api/curation/c001*',async route=>{if(!lost){lost=true;await route.fetch();await route.abort('failed');}else await route.continue();});
  await page.getByRole('button',{name:'Save only',exact:true}).click();await page.getByRole('button',{name:'Retry Save',exact:true}).waitFor();
  const written=(await bank.state()).candidates[0].review!;check(written.revision===2&&written.decision==='reject','Lost response preserves actual committed intent');
- check(await page.getByRole('radio',{name:'Keep Worth exploring further'}).isDisabled()&&await page.locator('#notes').isDisabled()&&await page.locator('#voice-select').isDisabled(),'Uncertain save freezes target and content');
+ check(await page.getByRole('radio',{name:'Keep Worth exploring further'}).isDisabled()&&await page.locator('#notes').isDisabled()&&await page.locator('#voice-select').isDisabled()&&await page.locator('#bank-select').isDisabled(),'Uncertain save freezes bank, target and content');
  await page.getByRole('button',{name:'Retry Save',exact:true}).click();await page.getByText('Review saved.',{exact:true}).waitFor();
  check((await bank.state()).candidates[0].review?.revision===2,'Retry is idempotent, not a second save');
- await page.unroute('**/api/curation/c001');
+ await page.unroute('**/api/curation/c001*');
  await page.locator('#notes').fill('Unsaved browser note');
  const original=(await bank.state()).candidates[0];
  await bank.save('c001',{bank:(await bank.state()).bank,audio_sha256:original.audio_sha256,expected_revision:2,operation_id:randomUUID(),decision:'keep',notes:'Agent fixture note'});
@@ -54,6 +58,28 @@ try {
  check(await page.getByRole('radio',{name:'Unsure I can’t decide yet'}).isChecked(),'Keyboard uncertainty choice is operable');
  await page.getByRole('button',{name:'Save & next'}).click();await page.getByText('Review saved. You reached the last audition.',{exact:true}).waitFor();
  check((await bank.state()).candidates[1].review?.decision==='unsure','Explicit uncertainty is not null or a numeric score');
+ const protectedPrimary=JSON.stringify(await bank.state());
+ await page.locator('#bank-select').selectOption('characters');await page.getByText('0 of 2 reviewed',{exact:true}).waitFor();
+ check(new URL(page.url()).searchParams.get('bank')==='characters','Selected bank is shareable in the URL');
+ check(await page.locator('#source-switch').isVisible(),'Original design comparison is available only for a source-backed bank');
+ await page.getByRole('button',{name:'Original design',exact:true}).click();
+ check((await page.locator('#audio').getAttribute('src'))?.includes('/media/curation-source-c001?bank=characters'),'Source playback is namespaced to this bank');
+ check(await page.getByRole('radio',{name:'Keep Worth exploring further'}).isDisabled()&&await page.locator('#save').isDisabled(),'Source comparison cannot save a review for different audio');
+ check((await characters.state()).reviewed===0,'Source comparison creates no review');
+ await page.locator('#audio').click({position:{x:22,y:25}});await page.waitForFunction(()=>document.querySelector<HTMLAudioElement>('#audio')!.currentTime>0);
+ check(await page.locator('#audio').evaluate((a:HTMLAudioElement)=>a.duration)>2.9,'Original design comparison decodes and actually plays');
+ await page.getByRole('button',{name:'Editable voice',exact:true}).click();await page.getByRole('radio',{name:'Keep Worth exploring further'}).check();await page.locator('#notes').fill('Character fixture note');
+ await page.getByRole('button',{name:'Original design',exact:true}).click();
+ check(await page.locator('#notes').inputValue()==='Character fixture note','Editable draft is retained while comparing source');
+ await page.getByRole('button',{name:'Editable voice',exact:true}).click();
+ page.once('dialog',dialog=>dialog.dismiss());await page.locator('#bank-select').selectOption('default');
+ check(await page.locator('#bank-select').inputValue()==='characters'&&await page.locator('#notes').inputValue()==='Character fixture note','Unsaved bank-switch cancellation retains bank and draft');
+ await page.getByRole('button',{name:'Save only',exact:true}).click();await page.getByText('Review saved.',{exact:true}).waitFor();
+ check((await characters.state()).reviewed===1,'Character decision is saved in its own bank');
+ check(JSON.stringify(await bank.state())===protectedPrimary,'Existing saved decisions are byte-semantically unchanged across banks');
+ await page.reload();await page.getByText('1 of 2 reviewed',{exact:true}).waitFor();
+ check(await page.locator('#bank-select').inputValue()==='characters'&&await page.getByRole('radio',{name:'Keep Worth exploring further'}).isChecked(),'Reload restores the selected bank and its saved decision');
+ await page.getByRole('button',{name:'Next',exact:true}).click();await page.getByRole('radio',{name:'Unsure I can’t decide yet'}).check();await page.getByRole('button',{name:'Save & next'}).click();await page.getByText('Review saved. You reached the last audition.',{exact:true}).waitFor();
  for(const [name,width,height,theme] of [['desktop',1280,1000,'light'],['phone',390,844,'light'],['desktop-dark',1280,1000,'dark'],['phone-dark',390,844,'dark']] as const){
   await page.setViewportSize({width,height});await page.emulateMedia({colorScheme:theme});await page.reload();await page.getByText('2 of 2 reviewed',{exact:true}).waitFor();
   check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),name+' has no horizontal overflow');
@@ -65,4 +91,4 @@ try {
  check(renderCalls===0,'No inference path used');check(errors.length===0,'No browser script errors');
  await writeFile(join(output,'proof.json'),JSON.stringify({scope:'Actual isolated synthetic-tone browser/API state; not real reviews, human acoustic acceptance or physical phone',checks,errors,renderCalls,source:'demos/voice-lab/scripts/curation-browser-check.ts'},null,2)+'\n');
  console.log(JSON.stringify({checks:checks.length,output,errors}));
-}finally{await browser.close();server.stop(true);await rm(fixture.root,{recursive:true,force:true});}
+}finally{await browser.close();server.stop(true);await Promise.all([rm(fixture.root,{recursive:true,force:true}),rm(extra.root,{recursive:true,force:true})]);}
