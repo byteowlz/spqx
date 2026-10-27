@@ -17,6 +17,14 @@ export function validateReview(v:any):ReviewInput {
   return {bank:v.bank,audio_sha256:v.audio_sha256,expected_revision:v.expected_revision,operation_id:v.operation_id,decision:v.decision,notes:v.notes};
 }
 
+function sourceFields(c:any){
+  const present=c.design_audio_sha256!==undefined||c.design_listening_sha256!==undefined||c.design_seconds!==undefined;
+  if(c.design_receipt_sha256!==undefined&&(!present||!sha(c.design_receipt_sha256)))throw new CurationError('curation_bank_invalid','The design prompt lacks receipt custody.',503);
+  if(!present)return {};
+  if(!sha(c.design_audio_sha256)||!sha(c.design_listening_sha256)||!Number.isFinite(c.design_seconds)||c.design_seconds<2||c.design_seconds>20)throw new CurationError('curation_bank_invalid','The design comparison lacks exact source custody.',503);
+  return {design_audio_sha256:c.design_audio_sha256,design_listening_sha256:c.design_listening_sha256,design_seconds:c.design_seconds,...(c.design_receipt_sha256?{design_receipt_sha256:c.design_receipt_sha256}:{})};
+}
+
 /** One private substrate for browser/API/CLI curation; never renders or enrolls. */
 export class CurationBank {
   private root:Promise<string>;
@@ -30,9 +38,7 @@ export class CurationBank {
     if(!plain(v)||v.version!==1||typeof v.id!=='string'||v.id.length<1||v.id.length>128||typeof v.text!=='string'||v.text.length>2000||!Array.isArray(v.ready)||v.ready.length<1||v.ready.length>200)throw new CurationError('curation_bank_invalid','No compatible completed audition bank was configured.',503);
     const ready=v.ready.map((c:any)=>{
       if(!plain(c)||!cid(c.id)||!sha(c.audio_sha256)||!sha(c.listening_sha256)||!sha(c.vector_f32_sha256)||!sha(c.conditioning_sha256)||!Number.isFinite(c.seconds)||c.seconds<2||c.seconds>20)throw new CurationError('curation_bank_invalid','An audition lacks exact audio/vector custody.',503);
-      const hasSource=c.design_audio_sha256!==undefined||c.design_listening_sha256!==undefined||c.design_seconds!==undefined;
-      if(hasSource&&(!sha(c.design_audio_sha256)||!sha(c.design_listening_sha256)||!Number.isFinite(c.design_seconds)||c.design_seconds<2||c.design_seconds>20))throw new CurationError('curation_bank_invalid','The design comparison lacks exact source custody.',503);
-      return {id:c.id,seconds:c.seconds,audio_sha256:c.audio_sha256,listening_sha256:c.listening_sha256,vector_f32_sha256:c.vector_f32_sha256,conditioning_sha256:c.conditioning_sha256,...(hasSource?{design_audio_sha256:c.design_audio_sha256,design_listening_sha256:c.design_listening_sha256,design_seconds:c.design_seconds}:{})};
+      return {id:c.id,seconds:c.seconds,audio_sha256:c.audio_sha256,listening_sha256:c.listening_sha256,vector_f32_sha256:c.vector_f32_sha256,conditioning_sha256:c.conditioning_sha256,...sourceFields(c)};
     });
     if(new Set(ready.map((c:any)=>c.id)).size!==ready.length)throw new CurationError('curation_bank_invalid','Duplicate audition IDs.',503);
     return {id:v.id,title:typeof v.title==='string'&&v.title.length<=160?v.title:'Voice exploration',text:v.text,ready};
@@ -52,9 +58,18 @@ export class CurationBank {
     const candidates=await Promise.all(bank.ready.map(async(c:any)=>{
       const review=await this.current(c.id);
       if(review&&(review.bank!==bank.id||review.audio_sha256!==c.audio_sha256))throw new CurationError('curation_stale','A saved review belongs to different audio; it was not relabelled.',409);
-      return {...c,media:'/media/curation-'+c.id,...(c.design_audio_sha256?{source_media:'/media/curation-source-'+c.id}:{}),review};
+      const design_prompt=await this.sourcePrompt(c,bank.text);
+      return {...c,media:'/media/curation-'+c.id,...(c.design_audio_sha256?{source_media:'/media/curation-source-'+c.id}:{}),...(design_prompt?{design_prompt}:{}),review};
     }));
     return {version:1,bank:bank.id,title:bank.title,text:bank.text,review_target:'editable',candidates,reviewed:candidates.filter((c:any)=>c.review?.decision!=null).length};
+  }
+  private async sourcePrompt(c:any,text:string){
+    if(!c.design_receipt_sha256)return;
+    const bytes=await readFile(await this.confined('candidates',c.id,'design.json'));
+    if(bytes.length>32000||hash(bytes)!==c.design_receipt_sha256)throw new CurationError('source_changed','The design prompt receipt changed; it was not shown.',409);
+    const receipt=JSON.parse(bytes.toString()),r=receipt.result;
+    if(receipt.output_sha256!==c.design_audio_sha256||r?.operation!=='voice_design'||r.eos_reached!==true||r.text!==text||typeof r.description!=='string'||r.description.length<1||r.description.length>6000)throw new CurationError('source_prompt_invalid','The prompt receipt does not match this completed source audition.',503);
+    return r.description as string;
   }
   private async target(id:string){
     if(!cid(id))throw new CurationError('not_found','No such audition.',404);

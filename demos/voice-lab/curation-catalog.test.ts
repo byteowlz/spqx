@@ -1,7 +1,7 @@
 import { test,expect,afterEach } from 'bun:test';
 import { readFile,writeFile,rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID,createHash } from 'node:crypto';
 import { curationFixture } from './curation-fixture';
 import { addDesignFixture } from './curation-design-fixture';
 import { CurationBank } from './curation';
@@ -19,6 +19,14 @@ test('catalog keys select real independent banks; unknown paths never fall back'
  expect(a.candidates[0].media).toBe('/media/curation-c001?bank=default');
  await expect(f.catalog.state('../../private')).rejects.toMatchObject({code:'bank_not_found'});
  expect(()=>new CurationCatalog(f.primary,new Map([['default',f.characters]]))).toThrow();
+});
+test('exact source prompts are receipt-bound and cannot silently relabel another source',async()=>{
+ const f=await setup(),b=await f.characters.state();expect(b.candidates[0].design_prompt).toBe('Original adult clockwork c001. <em>Literal prompt characters, not markup.</em>');
+ expect((await f.primary.state()).candidates[0].design_prompt).toBeUndefined();
+ const file=join(f.b.root,'candidates/c001/design.json'),v=JSON.parse(await readFile(file,'utf8'));v.result.description='Changed';await writeFile(file,JSON.stringify(v));
+ await expect(f.characters.state()).rejects.toMatchObject({code:'source_changed'});
+ v.output_sha256='0'.repeat(64);const bytes=JSON.stringify(v);await writeFile(file,bytes);f.design.ready[0].design_receipt_sha256=createHash('sha256').update(bytes).digest('hex');await writeFile(join(f.b.root,'index.json'),JSON.stringify(f.design));
+ await expect(f.characters.state()).rejects.toMatchObject({code:'source_prompt_invalid'});
 });
 test('same candidate ids cannot cross-save, and source audio cannot masquerade as editable audio',async()=>{
  const f=await setup(),a=await f.primary.state(),b=await f.characters.state();

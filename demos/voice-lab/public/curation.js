@@ -48,6 +48,7 @@ function show(reset=true){
  $('audio').setAttribute('aria-label',source?'Original design comparison':'Current editable voice audition');
  const seconds=source?row.design_seconds:row.seconds;
  $('audio-info').textContent=seconds.toFixed(2)+'s · '+(source?'original design':'editable audition')+' '+(index+1)+' of '+bank.candidates.length;
+ $('character-prompt').hidden=!row.design_prompt;$('design-prompt').textContent=row.design_prompt??'';
  $('audition-text').textContent=bank.text;$('workbench').hidden=false;$('unavailable').hidden=true;buttons();
 }
 function apply(next,discard=false){

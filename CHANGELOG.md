@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Show exact receipt-bound character prompts in the audition reviewer. Validate completed design/text/output custody before displaying instructions as escaped text; retain old audio, vectors, review format and saved decisions. Document why speaker-only reuse loses expressive conditioning and the bounded fidelity/edit-response experiment still needed.
+
 - Extend the audition reviewer with operator-configured bank selection and separately hash-bound original-design comparison. Bank-qualified state/save/media URLs preserve previous reviews even when candidate IDs repeat. Reviewing stays bound to the editable/Base audition; original-source playback disables Save and keeps its draft. No generation, semantic labels or enrollment is triggered by these controls. Add isolated cross-bank/source-media and browser safety tests.
 
 - Add a separate exact-audition web curation surface at `/curation` within the existing Voice Lab listener: individual playback, keep/reject/unsure, optional notes and explicit Save. API/CLI share atomic revisioned files, exact audio/vector custody, safe retry/reload and prior-revision recovery. No inferred midpoint scores, mandatory traits, generation, enrollment or changes to the existing rating bank. Retain the workbench anatomy with source-pinned neutral material; browser evidence is not native or appearance approval. See `demos/voice-lab/CURATION.md`.

@@ -62,6 +62,9 @@ try {
  await page.locator('#bank-select').selectOption('characters');await page.getByText('0 of 2 reviewed',{exact:true}).waitFor();
  check(new URL(page.url()).searchParams.get('bank')==='characters','Selected bank is shareable in the URL');
  check(await page.locator('#source-switch').isVisible(),'Original design comparison is available only for a source-backed bank');
+ await page.locator('#character-prompt summary').click();
+ check((await page.locator('#design-prompt').textContent())?.includes('clockwork c001. <em>'),'Exact source prompt is visible as literal text');
+ check(await page.locator('#design-prompt em').count()===0,'Prompt markup is escaped, never interpreted');
  await page.getByRole('button',{name:'Original design',exact:true}).click();
  check((await page.locator('#audio').getAttribute('src'))?.includes('/media/curation-source-c001?bank=characters'),'Source playback is namespaced to this bank');
  check(await page.getByRole('radio',{name:'Keep Worth exploring further'}).isDisabled()&&await page.locator('#save').isDisabled(),'Source comparison cannot save a review for different audio');
@@ -82,6 +85,7 @@ try {
  await page.getByRole('button',{name:'Next',exact:true}).click();await page.getByRole('radio',{name:'Unsure I can’t decide yet'}).check();await page.getByRole('button',{name:'Save & next'}).click();await page.getByText('Review saved. You reached the last audition.',{exact:true}).waitFor();
  for(const [name,width,height,theme] of [['desktop',1280,1000,'light'],['phone',390,844,'light'],['desktop-dark',1280,1000,'dark'],['phone-dark',390,844,'dark']] as const){
   await page.setViewportSize({width,height});await page.emulateMedia({colorScheme:theme});await page.reload();await page.getByText('2 of 2 reviewed',{exact:true}).waitFor();
+  await page.locator('#character-prompt summary').click();
   check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),name+' has no horizontal overflow');
   const tiny=await page.locator('button:not([hidden]),select,textarea,.choice').evaluateAll(nodes=>nodes.filter((n:any)=>n.getBoundingClientRect().width>0&&n.getBoundingClientRect().height<40).map((n:any)=>({id:n.id,height:n.getBoundingClientRect().height})));
   check(tiny.length===0,name+' controls have usable target height');

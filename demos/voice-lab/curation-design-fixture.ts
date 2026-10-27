@@ -13,6 +13,8 @@ export async function addDesignFixture(root:string){
   const p=Bun.spawn(['ffmpeg','-v','error','-n','-i',join(dir,'reference.wav'),'-c:a','aac','-b:a','64k',join(dir,'design-listening.m4a')],{stdout:'ignore',stderr:'pipe'});
   if(await p.exited!==0)throw new Error('Synthetic source AAC failed');
   c.design_seconds=c.seconds;c.design_audio_sha256=hash(wave);c.design_listening_sha256=hash(await Bun.file(join(dir,'design-listening.m4a')).bytes());
+  const receipt=Buffer.from(JSON.stringify({output_sha256:c.design_audio_sha256,result:{operation:'voice_design',eos_reached:true,text:index.text,description:'Original adult clockwork '+c.id+'. <em>Literal prompt characters, not markup.</em>'}}));
+  await writeFile(join(dir,'design.json'),receipt);c.design_receipt_sha256=hash(receipt);
  }
  await writeFile(file,JSON.stringify(index));return index;
 }
