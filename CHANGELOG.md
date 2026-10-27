@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a read-only two-take comparison workspace with explicit mechanism, transcript and instruction disclosure, exclusive playback and swap. Notes are transient and can be copied; no review, inference, or enrollment is implied. Operator-provided `compare-data.json` names existing listening assets, without modifying their source or prior reviews.
+
 - Show exact receipt-bound character prompts in the audition reviewer. Validate completed design/text/output custody before displaying instructions as escaped text; retain old audio, vectors, review format and saved decisions. Document why speaker-only reuse loses expressive conditioning and the bounded fidelity/edit-response experiment still needed.
 
 - Extend the audition reviewer with operator-configured bank selection and separately hash-bound original-design comparison. Bank-qualified state/save/media URLs preserve previous reviews even when candidate IDs repeat. Reviewing stays bound to the editable/Base audition; original-source playback disables Save and keeps its draft. No generation, semantic labels or enrollment is triggered by these controls. Add isolated cross-bank/source-media and browser safety tests.

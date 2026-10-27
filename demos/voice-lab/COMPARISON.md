@@ -1,0 +1,9 @@
+# Completed-take comparison
+
+`/compare` loads operator-provided `public/compare-data.json` from the existing Voice Lab server. Format: version1, `title`, `finding`, and `takes`, each with stable `id`, `label`, `mechanism`, `text`, `instruction` (nullable), and `media` URL. The runtime data document and audio are private, configured by the operator and not committed. The browser treats text literally. The data is read-only and does not alter existing curation records.
+
+Choose A and B; playback of either pauses the other. Swap changes selections without inference or relabeling. Expand text/instructions for provenance. Notes remain only in the page; Copy explicitly copies them, and they are lost on reload/navigation. This is not a durable review system and does not enroll, save, generate, or claim that requested edits are independent dials. Keep old audio/reviews intact. A human's listening feedback is distinguished from model output.
+
+The current private fixture points to individually preserved WAV copies on the existing trusted-tailnet audio-drops service. The voice-lab listener and that media origin must both be reachable; this is not a portable archive, a new HTTPS publication, or a guarantee of audio retention. Capture exact original native WAVs, conditioning and receipts separately. Future durable comparative annotations need their own revisioned exact-take substrate; never reuse speaker-vector curation fields for VoiceDesign-only audio.
+
+`just compare-browser-check`: two synthetic tone candidates on an isolated loopback server; checks both audio players, exclusive playback, swap, literal prompt escaping, draft preservation, responsive width and zero review writes. `just test` covers existing server/curation behavior. Live inspection separately verifies actual playback and does not write human reviews. No physical-phone/screen-reader or acoustic qualification is implied.

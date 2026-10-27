@@ -21,6 +21,9 @@ ratings-browser-check:
 curation-browser-check:
     bun scripts/curation-browser-check.ts
 
+compare-browser-check:
+    bun scripts/compare-browser-check.ts
+
 curation-check:
     bun test curation.test.ts curation-catalog.test.ts
     bun build server.ts --target=bun --outdir /tmp/spqx-curation-check
