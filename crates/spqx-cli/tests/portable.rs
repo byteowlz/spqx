@@ -94,6 +94,7 @@ fn design_and_model_download_commands_coexist_without_base_acquisition() {
             "Synthetic text.",
             "--instruct",
             "A fictional adult German voice",
+            "--no-play",
             "--out",
         ])
         .arg(&out)
@@ -108,6 +109,24 @@ fn design_and_model_download_commands_coexist_without_base_acquisition() {
     );
     assert!(!cache.exists());
     assert!(!out.exists());
+}
+
+#[test]
+fn design_headless_requires_an_output_before_model_acquisition() {
+    let scratch = Scratch::new();
+    let output = scratch
+        .command()
+        .args([
+            "design",
+            "Synthetic text.",
+            "--instruct",
+            "A fictional voice",
+            "--no-play",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("specify --out"));
 }
 
 #[cfg(feature = "qwentts")]

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Stream `spqx design` candidates through the same live player as `say`; use `--no-play` for headless WAV generation. Playback can include rejected attempts; only complete validated candidates are saved. `--out` is optional when playback is enabled.
+
 - Show per-file bytes, transfer rate and ETA for model downloads on interactive stderr; redirected output retains concise download messages and JSON stdout stays clean. Verified atomic download behavior is unchanged.
 
 - Add a read-only two-take comparison workspace with explicit mechanism, transcript and instruction disclosure, exclusive playback and swap. Notes are transient and can be copied; no review, inference, or enrollment is implied. Operator-provided `compare-data.json` names existing listening assets, without modifying their source or prior reviews.

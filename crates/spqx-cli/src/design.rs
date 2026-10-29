@@ -1,5 +1,5 @@
 //! Description-only native voice candidates. No registry/reference fallback or enrollment.
-use std::{io::Write, path::PathBuf, time::Instant};
+use std::{io::Write, path::PathBuf, sync::mpsc, time::Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
@@ -19,9 +19,12 @@ pub struct DesignArgs {
     /// Explicit native sampler seed. Unset means random; not a portable voice identity.
     #[arg(long)]
     pub seed: Option<u64>,
-    /// Save the completed candidate WAV. Existing files are not overwritten. No live playback.
+    /// Save the completed candidate WAV without overwriting an existing file.
     #[arg(long, value_name = "PATH")]
-    pub out: PathBuf,
+    pub out: Option<PathBuf>,
+    /// Do not play audio live; requires --out when playback is disabled.
+    #[arg(long)]
+    pub no_play: bool,
 }
 
 /// One accepted candidate plus the seeds rejected on the way to it.
@@ -38,17 +41,47 @@ struct Candidate {
 pub fn run(args: DesignArgs, common: &CommonOpts) -> Result<()> {
     let started = Instant::now();
     let config = validate(&args, common)?;
-    let out = crate::say::resolve_out(&config, &args.out);
-    if out.exists() {
-        bail!("candidate output already exists: {}", out.display());
+    let out = args
+        .out
+        .as_ref()
+        .map(|path| crate::say::resolve_out(&config, path));
+    if let Some(path) = &out {
+        if path.exists() {
+            bail!("candidate output already exists: {}", path.display());
+        }
     }
-    let candidate = produce(&config, &args)?;
+    let play = config.audio.play && !args.no_play;
+    if !play && out.is_none() {
+        bail!("playback is disabled; specify --out to save the candidate");
+    }
+    let (tx, player) = if play {
+        let (tx, rx) = mpsc::channel();
+        let player = crate::playback::Player::start(rx, config.audio.sample_rate_hz)
+            .context("starting audio playback")?;
+        if args.seed.is_none() && !common.quiet {
+            eprintln!("Live playback can include rejected attempts; their seeds will be reported.");
+        }
+        (Some(tx), Some(player))
+    } else {
+        (None, None)
+    };
+    let candidate = produce(&config, &args, |chunk| {
+        if let Some(tx) = &tx {
+            let _ = tx.send(chunk.to_vec());
+        }
+    })?;
+    drop(tx);
+    if let Some(player) = player {
+        player.wait();
+    }
     // Candidate audio is not trimmed, denoised or regenerated after selection.
-    write_candidate(&out, &candidate.samples, candidate.stats.sample_rate)?;
+    if let Some(path) = &out {
+        write_candidate(path, &candidate.samples, candidate.stats.sample_rate)?;
+    }
     report(
         common,
         &args,
-        &out,
+        out.as_deref(),
         &candidate,
         started.elapsed().as_secs_f64(),
     );
@@ -72,13 +105,17 @@ fn validate(args: &DesignArgs, common: &CommonOpts) -> Result<crate::config::Con
 
 /// Each attempt is one independent, reproducible sample. A sample that misses
 /// EOS (e.g. a silence runaway) or is silent is rejected, never trimmed.
-fn produce(config: &crate::config::Config, args: &DesignArgs) -> Result<Candidate> {
+fn produce(
+    config: &crate::config::Config,
+    args: &DesignArgs,
+    mut on_audio: impl FnMut(&[f32]) + Send,
+) -> Result<Candidate> {
     let mut rejected = Vec::new();
     for seed in attempt_seeds(args.seed) {
         let mut samples = Vec::new();
         let (stats, prepare_s, model) =
             engine::design_streaming(config, &args.instruct, Some(seed), &args.text, |chunk| {
-                samples.extend_from_slice(chunk)
+                forward_chunk(&mut samples, chunk, &mut on_audio);
             })?;
         match validate_candidate(&samples, stats.eos_reached) {
             Ok(()) => {
@@ -103,6 +140,11 @@ fn produce(config: &crate::config::Config, args: &DesignArgs) -> Result<Candidat
     )
 }
 
+fn forward_chunk(samples: &mut Vec<f32>, chunk: &[f32], on_audio: &mut impl FnMut(&[f32])) {
+    samples.extend_from_slice(chunk);
+    on_audio(chunk);
+}
+
 fn write_candidate(out: &std::path::Path, samples: &[f32], rate: u32) -> Result<()> {
     if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
@@ -120,7 +162,7 @@ fn write_candidate(out: &std::path::Path, samples: &[f32], rate: u32) -> Result<
 fn report(
     common: &CommonOpts,
     args: &DesignArgs,
-    out: &std::path::Path,
+    out: Option<&std::path::Path>,
     c: &Candidate,
     elapsed_s: f64,
 ) {
@@ -145,8 +187,9 @@ fn report(
         );
     } else if !common.quiet {
         eprintln!(
-            "VoiceDesign candidate -> {} ({:.2}s audio, seed {}; no registry enrollment)",
-            out.display(),
+            "VoiceDesign candidate{} ({:.2}s audio, seed {}; no registry enrollment)",
+            out.map(|path| format!(" -> {}", path.display()))
+                .unwrap_or_default(),
             c.stats.audio_s,
             c.seed
         );
@@ -184,6 +227,16 @@ fn validate_candidate(samples: &[f32], eos: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn streamed_chunks_are_forwarded_without_changing_saved_audio() {
+        let mut stored = Vec::new();
+        let mut played = Vec::new();
+        for chunk in [&[0.1, -0.2][..], &[0.3][..]] {
+            forward_chunk(&mut stored, chunk, &mut |pcm| played.extend_from_slice(pcm));
+        }
+        assert_eq!(stored, vec![0.1, -0.2, 0.3]);
+        assert_eq!(played, stored);
+    }
     #[test]
     fn explicit_seed_is_single_attempt_and_random_seeds_are_valid() {
         assert_eq!(attempt_seeds(Some(4242)), [4242]);

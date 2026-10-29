@@ -16,10 +16,10 @@ On Apple Silicon the default build selects its pinned MLX VoiceDesign snapshot:
 spqx --backend ggml --device cuda:0 --config config.toml --json design \
   "Heute probieren wir eine neue Stimme aus." \
   --instruct "A fictional adult German voice, calm and conversational." \
-  --language german --seed 4242 --out candidate.wav > candidate.json
+  --language german --seed 4242 --no-play --out candidate.wav > candidate.json
 ```
 
-For custom/local assets, set `model.design_path` to the VoiceDesign GGUF file and `engine.codec` to its codec. Set `engine.library` only when not using the matching bundled runtime. Output is native 24 kHz mono PCM16 WAV; other configured sample rates are rejected rather than silently resampling candidates. No denoising, trimming or regeneration of an explicit seeded attempt is performed. Unseeded attempts follow the bounded retry policy below. Existing output files are not overwritten, including files created while inference is running. No live playback is started.
+For custom/local assets, set `model.design_path` to the VoiceDesign GGUF file and `engine.codec` to its codec. Set `engine.library` only when not using the matching bundled runtime. Output is native 24 kHz mono PCM16 WAV; other configured sample rates are rejected rather than silently resampling candidates. No denoising, trimming or regeneration of an explicit seeded attempt is performed. Unseeded attempts follow the bounded retry policy below. Existing output files are not overwritten, including files created while inference is running. Live playback starts by default using the same streaming player as `say` (unless `audio.play = false`). Use `--no-play --out candidate.wav` for headless generation; `--out` is optional when playback is enabled. Playback happens before the complete candidate can be validated, so a rejected incomplete attempt may be audible; an unseeded request can play up to three attempts and reports rejected seeds. Only a validated completed candidate is saved.
 
 The JSON records the description, spoken text, language, seed, model path, selected backend and timing boundaries. Keep the exact WAV with this recipe and independently recorded model/runtime hashes. A seed is not a portable voice identity or a guarantee across engines/devices. Saving a candidate does not promote a registry voice or enroll recognition.
 
