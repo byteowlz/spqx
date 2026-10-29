@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Show per-file bytes, transfer rate and ETA for model downloads on interactive stderr; redirected output retains concise download messages and JSON stdout stays clean. Verified atomic download behavior is unchanged.
+
 - Add a read-only two-take comparison workspace with explicit mechanism, transcript and instruction disclosure, exclusive playback and swap. Notes are transient and can be copied; no review, inference, or enrollment is implied. Operator-provided `compare-data.json` names existing listening assets, without modifying their source or prior reviews.
 
 - Show exact receipt-bound character prompts in the audition reviewer. Validate completed design/text/output custody before displaying instructions as escaped text; retain old audio, vectors, review format and saved decisions. Document why speaker-only reuse loses expressive conditioning and the bounded fidelity/edit-response experiment still needed.

@@ -52,6 +52,47 @@ fn agent() -> ureq::Agent {
 }
 
 #[test]
+fn download_progress_tracks_bytes_and_stays_hidden_on_redirected_stderr() {
+    let progress = download_progress(100);
+    assert_eq!(progress.length(), Some(100));
+    progress.set_position(42);
+    assert_eq!(progress.position(), 42);
+    if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        assert!(progress.is_hidden());
+    }
+    progress.finish_and_clear();
+}
+#[test]
+fn slow_transfer_updates_the_real_download_path() {
+    let body = vec![7u8; 256 * 1024];
+    let p = profile(&body);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        stream.read(&mut request).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        for chunk in body.chunks(64 * 1024) {
+            stream.write_all(chunk).unwrap();
+            stream.flush().unwrap();
+            thread::sleep(Duration::from_millis(120));
+        }
+    });
+    let cache = tempfile::tempdir().unwrap();
+    let path = acquire(&p, cache.path(), false, &agent(), &origin).unwrap();
+    assert_eq!(
+        fs::metadata(path.join("nested/weights.bin")).unwrap().len(),
+        p.files[0].bytes
+    );
+    server.join().unwrap();
+}
+#[test]
 fn pinned_download_then_offline_reuse_and_corruption_detection() {
     let cache = tempfile::tempdir().unwrap();
     let body = b"synthetic model";

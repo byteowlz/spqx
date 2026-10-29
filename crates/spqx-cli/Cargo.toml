@@ -32,6 +32,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
 ureq = "2.12"
+indicatif = "0.17"
 sha2 = "0.10"
 fs2 = "0.4"
 voqx-core = { git = "https://github.com/byteowlz/voqx.git", rev = "36ca757a7f4f5f28bfc2b4ed97cfe63919e5082e", default-features = false }

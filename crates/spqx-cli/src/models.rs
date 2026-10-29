@@ -5,6 +5,7 @@ mod tests;
 use crate::{config::Config, engine::expand};
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -285,6 +286,7 @@ fn fetch(
     fs::create_dir_all(parent)?;
     let mut pending = tempfile::NamedTempFile::new_in(parent)?;
     let mut input = response.into_reader();
+    let progress = download_progress(asset.bytes);
     let mut buffer = [0u8; 65536];
     let mut bytes = 0u64;
     let mut hash = Sha256::new();
@@ -303,7 +305,9 @@ fn fetch(
         }
         pending.write_all(&buffer[..n])?;
         hash.update(&buffer[..n]);
+        progress.set_position(bytes);
     }
+    progress.set_message("verifying");
     if bytes != asset.bytes || format!("{:x}", hash.finalize()) != asset.sha256 {
         bail!("model integrity check failed: {}", asset.path);
     }
@@ -311,5 +315,18 @@ fn fetch(
     pending
         .persist(destination)
         .with_context(|| format!("committing verified model {}", destination.display()))?;
+    progress.finish_and_clear();
     Ok(())
+}
+
+fn download_progress(total: u64) -> ProgressBar {
+    let progress = ProgressBar::new(total);
+    // indicatif draws on stderr only when it is an interactive terminal.
+    progress.set_style(
+        ProgressStyle::with_template(
+            "  [{bar:32.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} ETA {eta} {msg}",
+        )
+        .unwrap_or_else(|_| ProgressStyle::default_bar()),
+    );
+    progress
 }
