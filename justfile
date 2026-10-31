@@ -122,6 +122,21 @@ install accel=default_accel:
     fi
     printf 'Installed: %s/spqx, %s/spqx-tts-worker (models and voices are separate)\n' "$bin" "$bin"
 
+# Install all available CLI/worker features for the detected accelerator.
+# On GGML targets build the pinned native runtime when none was supplied.
+install-all accel=default_accel:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    resolved=$(bash scripts/accel-env.sh "${1:-auto}") || exit 2
+    eval "$resolved"
+    if [[ $SPQX_ACCEL != mlx && $SPQX_ACCEL != tch && -z ${SPQX_RUNTIME:-} ]]; then
+        runtime=$(mktemp -d "${TMPDIR:-/tmp}/spqx-runtime.XXXXXXXX")
+        trap 'rm -rf "$runtime"' EXIT
+        bash scripts/build-qwentts-runtime.sh "$SPQX_ACCEL" "$runtime"
+        export SPQX_RUNTIME="$runtime"
+    fi
+    just install "$SPQX_ACCEL"
+
 # Install for Apple Silicon MLX, including the compiled metallib.
 install-mlx: (install "mlx")
 

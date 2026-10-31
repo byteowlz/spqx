@@ -112,11 +112,14 @@ just accel              # show the accelerator and features that would be used
 git submodule update --init --recursive   # mlx-c, needed for MLX builds
 just build mlx          # debug build
 just build-release mlx  # release build
-just install mlx        # cargo install plus the compiled mlx.metallib beside it
+just install-all        # detect accelerator; install CLI, worker and matching runtime
+just install mlx        # explicit MLX build and matching metallib
 ```
 
-`just install` never touches configuration, voices, models or recordings. GGML
-builds additionally need `SPQX_RUNTIME` pointing at a directory built by
+`just install-all` auto-builds the pinned GGML runtime when needed; it downloads
+native source but not models. It and `just install` never touch configuration,
+voices, models or recordings. For a manually selected runtime, GGML
+builds need `SPQX_RUNTIME` pointing at a directory built by
 `just runtime`, so it can copy the libqwen libraries into `<cargo-bin>/lib`.
 
 ```bash

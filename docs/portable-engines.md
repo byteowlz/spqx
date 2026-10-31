@@ -24,7 +24,7 @@ reported); this never proves inference availability. `just accel [accel]` prints
 the resolution without building anything. `SPQX_ACCEL` supplies the default and
 an explicit recipe argument overrides it. CUDA architecture overrides are retained.
 
-`just install mlx` keeps its Cargo target directory for metallib staging. Multiple
+`just install-all` selects the accelerator automatically, installs the CLI and worker, and builds the pinned GGML runtime if `SPQX_RUNTIME` is not set. It downloads native source when needed, but not models. `just install mlx` keeps its Cargo target directory for metallib staging. Multiple
 candidate metallibs must be byte-identical, otherwise staging fails and requires
 an explicit `SPQX_METALLIB` producer artifact. A supplied GGML runtime is checked
 before replacing binaries; legacy `tch` installs do not require a GGML runtime.

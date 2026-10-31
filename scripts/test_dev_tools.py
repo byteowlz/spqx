@@ -129,6 +129,28 @@ class DeveloperTools(unittest.TestCase):
         self.assertEqual((self.root / "cargo.target").read_text().strip(), self.env["CARGO_TARGET_DIR"])
 
     @unittest.skipUnless(JUST, "just is required for recipe routing tests")
+    def test_install_all_mlx_stages_metallib_and_cli_features(self):
+        self.env.update(TEST_OS="Darwin", TEST_ARCH="arm64")
+        result = self.run_just("install-all")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((Path(self.env["CARGO_INSTALL_ROOT"]) / "bin/mlx.metallib").read_bytes(), b"fixture")
+        self.assertIn("mlx,qwentts,playback", (self.root / "cargo.args").read_text())
+
+    @unittest.skipUnless(JUST, "just is required for recipe routing tests")
+    def test_install_all_builds_missing_ggml_runtime(self):
+        source = self.root / "qwentts source"
+        (source / "ggml").mkdir(parents=True)
+        (source / "LICENSE").write_text("fixture")
+        (source / "ggml/LICENSE").write_text("fixture")
+        self.env["SPQX_QWENTTS_SOURCE"] = str(source)
+        self.tool("git", 'case "$*" in *rev-parse*) case "$*" in */ggml*) echo cc5df49a6b878db2b68b9a7b45976e279594627d;; *) echo 5916bf7c79dbb4e66fc059cdc507a79a23a28bb4;; esac;; esac')
+        self.tool("cmake", 'if [[ "${1:-}" == --build ]]; then mkdir -p "$2"; printf runtime > "$2/libqwen.so"; fi')
+        result = self.run_just("install-all", "cpu")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((Path(self.env["CARGO_INSTALL_ROOT"]) / "bin/lib/libqwen.so").read_bytes(), b"runtime")
+        self.assertIn("qwentts,playback", (self.root / "cargo.args").read_text())
+
+    @unittest.skipUnless(JUST, "just is required for recipe routing tests")
     def test_bad_runtime_fails_before_install_and_tch_needs_no_ggml(self):
         self.env["SPQX_RUNTIME"] = str(self.root / "missing runtime")
         result = self.run_just("install", "cpu")

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `just install-all` to install the CLI and worker with automatic accelerator selection and the matching MLX library or pinned GGML runtime. Models remain downloaded on demand.
+
 - Stream `spqx design` candidates through the same live player as `say`; use `--no-play` for headless WAV generation. Playback can include rejected attempts; only complete validated candidates are saved. `--out` is optional when playback is enabled.
 
 - Show per-file bytes, transfer rate and ETA for model downloads on interactive stderr; redirected output retains concise download messages and JSON stdout stays clean. Verified atomic download behavior is unchanged.
